@@ -218,10 +218,21 @@ int main (int argc, char* argv[])
 
     cudaMemcpy(d_input, h_input, mat_memsize, cudaMemcpyHostToDevice); 
 
+    cudaEvent_t startEvent, stopEvent;
+    cudaEventCreate(&startEvent);
+    cudaEventCreate(&stopEvent);
+    float ms;
+    cudaEventRecord(startEvent, 0);
+
     /*invoke a kernel*/
     //transpose_simple<<< dimGrid, dimBlock >>>(d_output, d_input, Width, Height);
-    //transpose_sharedtile<<< dimGrid, dimBlock >>>(d_output, d_input, Width, Height);
-    transpose_sharedtile_bankconflictavoid<<< dimGrid, dimBlock >>>(d_output, d_input, Width, Height);
+    transpose_sharedtile<<< dimGrid, dimBlock >>>(d_output, d_input, Width, Height);
+    //transpose_sharedtile_bankconflictavoid<<< dimGrid, dimBlock >>>(d_output, d_input, Width, Height);
+
+    cudaEventRecord(stopEvent, 0);
+    cudaEventSynchronize(stopEvent);
+    cudaEventElapsedTime(&ms, startEvent, stopEvent);
+    std::cout << "Time elapsed: " << ms << "\n";
 
     //rotate_matrix<<< dimGrid, dimBlock >>>(d_input, d_output, Width, Height);	
 
@@ -232,6 +243,8 @@ int main (int argc, char* argv[])
 
     check_transpose_error(h_output, answer_check, Width*Height);
 error_exit:
+    cudaEventDestroy(startEvent);
+    cudaEventDestroy(stopEvent);
     /*free memory*/
     free(h_input);
     free(h_output);
