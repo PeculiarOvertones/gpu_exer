@@ -4,7 +4,7 @@
 #include <iostream>
 #include <assert.h>
 /** Compile with one of three options for matrix multiplication:
-  * NAIVE, CONSTMEM, TILED_CONSTMEM_TYPE_1, TILED_CONSTMEM_TYPE_2, TILED_CONSTMEM_CACHEHALO_TYPE_1
+  * NAIVE, CONSTMEM, TILED_CONSTMEM_TYPE_1, TILED_CONSTMEM_TYPE_2, TILED_CONSTMEM_CACHEHALO
   * For Printing use flag: PRINT
   **/
 
@@ -17,6 +17,8 @@ __constant__ float F[2*FILTER_RADIUS+1][2*FILTER_RADIUS+1];
 #ifdef TILED_CONSTMEM_TYPE_1
 const int IN_TILE_SIZE = 32;
 const int OUT_TILE_SIZE = IN_TILE_SIZE - 2*FILTER_RADIUS;
+#elif TILED_CONSTMEM_CACHEHALO
+const int TILE_SIZE = 32;
 #endif
 
 #ifdef NAIVE
@@ -129,58 +131,58 @@ __global__ void convolution_tiled_constmem_type1(float *M, const float *A, const
 #endif
 
 
-#ifdef TILED_CONSTMEM_CACHEHALO_TYPE_1
-//__global__ void matmul_tiled_coarsened(float *M, const float *A, const float *B, const int Height, const int Width, const int InnerSize) 
-//{
-//    __shared__ float tile_A[TILE_SIZE][TILE_SIZE];
-//    __shared__ float tile_B[TILE_SIZE][TILE_SIZE];
-//
-//    int col = blockIdx.x*TILE_SIZE*COARSE_FACTOR + threadIdx.x;
-//    int row = blockIdx.y*TILE_SIZE + threadIdx.y;
-//  
-//    float sum[COARSE_FACTOR];
-//    for(int c=0; c<COARSE_FACTOR; ++c) sum[c] = 0.f;
-//
-//    for(int istart=0; istart < InnerSize; istart += TILE_SIZE) 
-//    {
-//        /*load tile A*/
-//        int colA = (istart + threadIdx.x);
-//
-//        if(row < Height && colA < InnerSize) 
-//            tile_A[threadIdx.y][threadIdx.x] = A[row*InnerSize + colA];
-//        else 
-//            tile_A[threadIdx.y][threadIdx.x] = 0.f;
-//        
-//
-//        int rowB = (istart + threadIdx.y);
-//        for(int c=0; c<COARSE_FACTOR; ++c) 
-//	{
-//            /*load tile B*/
-//            int colB = c*TILE_SIZE + col;
-//
-//            if(rowB < InnerSize && colB < Width) 
-//                tile_B[threadIdx.y][threadIdx.x] = B[rowB*Width + colB];
-//            else 
-//                tile_B[threadIdx.y][threadIdx.x] = 0.f;
-//
-//            __syncthreads();
-//
-//            /*do computations*/
-//            for (int t=0; t<TILE_SIZE; ++t) 
-//            {
-//    	        sum[c] += tile_A[threadIdx.y][t] * tile_B[t][threadIdx.x];    
-//            }
-//
-//            __syncthreads();
-//	}
-//    }
-//
-//    if(row < Height && col < Width) 
-//    {
-//        for(int c=0; c<COARSE_FACTOR; ++c) M[row*Width + (c*TILE_SIZE + col)] = sum[c];
-//    }
-//}
+#ifdef TILED_CONSTMEM_CACHEHALO
+__global__ void convolution_tiled_constmem_cachehalo(float *M, const float *A, const int Height, const int Width) 
+{
+	
+    int FilterSize = 2*FILTER_RADIUS + 1;
+
+    int col = blockIdx.x*TILE_SIZE + threadIdx.x;
+    int row = blockIdx.y*TILE_SIZE + threadIdx.y;
+
+    __shared__ float tile_A[TILE_SIZE][TILE_SIZE];
+
+    /*load tile*/
+    if(row < Height && col < Width) 
+        tile_A[threadIdx.y][threadIdx.x] = A[row*Width + col];
+    else
+        tile_A[threadIdx.y][threadIdx.x] = 0.;
+     
+    __syncthreads();
+
+    if(row < Height && col < Width) 
+    {
+        float sum = 0.f;	    
+        for(int j=0; j<FilterSize; ++j) 
+        {
+            for(int i=0; i<FilterSize; ++i) 
+            {
+		int local_A_colId = threadIdx.y + j - FILTER_RADIUS;
+	        int local_A_rowId = threadIdx.x + i - FILTER_RADIUS;
+
+		if(local_A_colId >=0 && local_A_colId < TILE_SIZE && 
+		   local_A_rowId >=0 && local_A_rowId < TILE_SIZE)     /*make sure you are within the local tile*/
+		{
+                    sum += tile_A[threadIdx.y + j - FILTER_RADIUS][threadIdx.x + i - FILTER_RADIUS] * F[j][i];	    
+		}
+		else 
+		{
+		    int global_A_colId = col + j - FILTER_RADIUS;
+		    int global_A_rowId = row + i - FILTER_RADIUS;
+
+		    if (global_A_colId >= 0 && global_A_colId < Width &&   
+	 	        global_A_rowId >= 0 && global_A_rowId < Height)  /*make sure the global id for accessing A is within the global boundaries*/
+		    {
+		        sum += A[ global_A_colId*Width + global_A_rowId ] * F[j][i];
+		    }
+		}
+            }
+        }
+        M[row*Width + col] = sum;
+    }
+}
 #endif
+
 
 void set_zero(float *M) 
 {
@@ -244,8 +246,9 @@ int main (int argc, char* argv[])
     dim3 dimGrid(ceil(Width/static_cast<float>(OUT_TILE_SIZE)), ceil(Height/static_cast<float>(OUT_TILE_SIZE)), 1);
     dim3 dimBlock(IN_TILE_SIZE, IN_TILE_SIZE, 1);
     std::cout << "IN_TILE_SIZE, OUT_TILE_SIZE: " << std::setw(10) << IN_TILE_SIZE  << std::setw(10) << OUT_TILE_SIZE << "\n";
-#elif TILED_CONSTMEM_CACHEHALO_TYPE_1
-    dim3 dimBlock(IN_TILE_SIZE, IN_TILE_SIZE, 1); 
+#elif TILED_CONSTMEM_CACHEHALO
+    dim3 dimGrid(ceil(Width/static_cast<float>(TILE_SIZE)), ceil(Height/static_cast<float>(TILE_SIZE)), 1);
+    dim3 dimBlock(TILE_SIZE, TILE_SIZE, 1); 
 #endif
 
     int devID=0;
@@ -349,7 +352,7 @@ int main (int argc, char* argv[])
     convolution_constmem<<<dimGrid, dimBlock>>>(d_M, d_A, Height, Width);
 #elif TILED_CONSTMEM_TYPE_1
     convolution_tiled_constmem_type1<<<dimGrid, dimBlock>>>(d_M, d_A, Height, Width);
-#elif TILED_CONSTMEM_CACHEHALO_TYPE_1
+#elif TILED_CONSTMEM_CACHEHALO
     convolution_tiled_constmem_cachehalo<<<dimGrid, dimBlock>>>(d_M, d_A, Height, Width);
 #endif
 
