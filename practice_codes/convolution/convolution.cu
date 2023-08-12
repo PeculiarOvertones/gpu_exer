@@ -16,7 +16,7 @@ __constant__ float F[2*FILTER_RADIUS+1][2*FILTER_RADIUS+1];
 
 #ifdef TILED_CONSTMEM_TYPE_1
 const int IN_TILE_SIZE = 32;
-const int OUT_TILE_SIZE = IN_TILE_SIZE - 2*FILTER_RADIUS
+const int OUT_TILE_SIZE = IN_TILE_SIZE - 2*FILTER_RADIUS;
 #endif
 
 #ifdef NAIVE
@@ -93,37 +93,37 @@ __global__ void convolution_constmem_tiled_type1(float *M, const float *A, const
 	
     int FilterSize = 2*FILTER_RADIUS + 1;
 
-    int inCol = blockIdx.x*OUT_TILE_SIZE - FILa+ threadIdx.x;
-    int inRow = blockIdx.y*blockDim.y + threadIdx.y;
+    int inCol = blockIdx.x*OUT_TILE_SIZE - FILTER_RADIUS + threadIdx.x;
+    int inRow = blockIdx.y*OUT_TILE_SIZE - FILTER_RADIUS + threadIdx.y;
 
-    int outCol = blockIdx.x*blockDim.x + threadIdx.x;
-    int outRow = blockIdx.y*blockDim.y + threadIdx.y;
+    __shared__ tile_A[IN_TILE_SIZE][IN_TILE_SIZE];
 
     /*load tile*/
+    if(inRow >=0 && inRow < Height && inCol >=0 && inCol <= Width) 
+        tile_A[threadIdx.y][threadIdx.x] = A[inRow*Width + inCol];
+    else
+        tile_A[threadIdx.y][threadIdx.x] = 0.;
      
-
     __syncthreads();
 
-    __syncthreads();
-    float sum = 0.f;    
-    for(int j =  0; j < FilterSize; j++) 
+    int local_out_colId = threadIdx.y - FILTER_RADIUS;
+    int local_out_rowId = threadIdx.x - FILTER_RADIUS;
+
+    if(local_out_colId >=0 && local_out_colId  < OUT_TILE_SIZE &&
+       local_out_rowId >=0 && local_out_rowId < OUT_TILE_SIZE )
     {
-        for(int i = 0; i < FilterSize; i++) 
+        float sum = 0.f;	    
+        for(int j=0; j<FilterSize; ++j) 
         {
-    	    int inCol = outCol + i - FILTER_RADIUS;    
-    	    int inRow = outRow + j - FILTER_RADIUS;    
-                        	
-    	    if(inRow >= 0 && inRow < Height && inCol >=0 && inCol < Width) 
-    	    {
-                sum += A[inRow*Width + inCol] * F[j][i];     
-    	    }
+            for(int i=0; i<FilterSize; ++i) 
+            {
+                sum += tile_A[local_out_rowId][local_out_colId] * F[j][i];	    
+            }
         }
+        M[inRow*Width + inCol] = sum;
     }
 
-    if(outRow < Height && outCol < Width) 
-    {
-        M[outRow*Width + outCol] = sum;
-    }
+    __syncthreads();
 }
 #endif
 
@@ -328,13 +328,14 @@ int main (int argc, char* argv[])
 #endif
 
     cudaMemcpy(d_A, h_A, matA_memsize, cudaMemcpyHostToDevice);
+
 #ifdef NAIVE
     cudaMemcpy(d_F, h_F, matF_memsize, cudaMemcpyHostToDevice);
-#else
+#else  //use constant memory
     cudaMemcpyToSymbol(F, h_F, matF_memsize);
 #endif
 
-//    cudaMemset(d_M, 0, matM_memsize);
+//  cudaMemset(d_M, 0, matM_memsize);
     cudaEvent_t startEvent, stopEvent;
     cudaEventCreate(&startEvent);
     cudaEventCreate(&stopEvent);
@@ -346,9 +347,9 @@ int main (int argc, char* argv[])
 #elif CONSTMEM
     convolution_constmem<<<dimGrid, dimBlock>>>(d_M, d_A, Height, Width);
 #elif TILED_CONSTMEM_TYPE_1
-    convolution_tiled_constmem_type1<<<dimGrid, dimBlock>>>(d_M, d_A, Height, Width);
-#elif TILED_CONSTMEM_CACHEHALO
-    convolution_tiled_constmem_cachehalo<<<dimGrid, dimBlock>>>(d_M, d_A, Height, Width);
+    convolution_constmem_tiled_type1<<<dimGrid, dimBlock>>>(d_M, d_A, Height, Width);
+#elif TILED_CONSTMEM_CACHEHALO_TYPE_1
+    convolution_constmem_tiled_cachehalo<<<dimGrid, dimBlock>>>(d_M, d_A, Height, Width);
 #endif
 
     cudaEventRecord(stopEvent, 0);
