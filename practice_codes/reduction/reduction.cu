@@ -43,9 +43,9 @@ __global__ void reduce_sum_naive(float *output, const float *in, unsigned int le
                in[i] += in[i + stride];
 	   }
        }
-    }
 
-    __syncthreads();
+       __syncthreads();
+    }
 
     if(threadIdx.x == 0) 
     {
@@ -54,34 +54,140 @@ __global__ void reduce_sum_naive(float *output, const float *in, unsigned int le
 }
 #endif
 
-#ifdef REDUCED_GLOBALMEM
+
+#ifdef CONVERGENT
 __global__ void reduce_sum_convergent(float *output, const float *in, unsigned int length) 
 {
     /*assume that the kernal is launched with 
       dim3 blockDim(ceil(in.size()/2), 1, 1);
       dim3 gridDim(1,1,1);
       */
-    __shared__ float in_s[BLOCK_SIZE];
+    /*less control divergence and better memory coalescing*/
 
-    unsigned int t = threadIdx.x;
-
-    in_s[t] = in[t] + in[t + blockDim.x];
+    unsigned int i = threadIdx.x;
 
     for(unsigned int stride = blockDim.x; stride >=1 ; stride /= 2) 
     {
        if(threadIdx.x < stride) 
        {
-	   if(i+stride < length) 
+	   if(i + stride < length) 
+	   {
+               in[i] += in[i + stride]; /*no need for atomic*/
+	   }
+       }
+       __syncthreads();
+    }
+
+    if(threadIdx.x == 0) 
+    {
+        *output = in[0];
+    }
+}
+#endif
+
+#ifdef SHAREDMEM
+__global__ void reduce_sum_sharedmem(float *output, const float *in, unsigned int length) 
+{
+    /*assume that the kernal is launched with 
+      dim3 blockDim(ceil(in.size()/2), 1, 1);
+      dim3 gridDim(1,1,1);
+      */
+    /*fewer accesses to global memory*/
+
+    __shared__ float in_s[BLOCK_SIZE];
+
+    unsigned int i = threadIdx.x;
+
+    in_s[i] = in[i] + in[i+blockDim.x];
+
+    for(unsigned int stride = blockDim.x/2; stride >=1 ; stride /= 2) 
+    {
+       __syncthreads();
+
+       if(threadIdx.x < stride) 
+       {
+	   if(i + stride < length) 
 	   {
                in_s[i] += in_s[i + stride]; /*no need for atomic*/
 	   }
        }
     }
-    __syncthreads();
 
     if(threadIdx.x == 0) 
     {
         *output = in_s[0];
+    }
+}
+#endif
+
+
+#ifdef HIERARCHICAL
+__global__ void reduce_sum_hierarchical(float *output, const float *in) 
+{
+    /*assume that the kernal is launched with 
+      dim3 blockDim(BLOCK_SIZE, 1, 1);
+      dim3 gridDim(ceil(in.size()/(2*BLOCK_SIZE)),1,1); //Note that we are dividing by segment size
+      */
+    /*worked with large data*/
+
+    __shared__ float in_s[BLOCK_SIZE];
+
+    unsigned int segment =  2*blockDim.x*blockIdx.x;
+    unsigned int i = segment + threadIdx.x;
+
+    in_s[threadIdx.x] = in[i] + in[i + blockDim.x];
+
+    for(unsigned int stride = blockDim.x/2; stride >=1 ; stride /= 2) 
+    {
+       __syncthreads();
+
+       if(threadIdx.x < stride) 
+       {
+           in_s[threadIdx.x] += in_s[threadIdx.x + stride]; /*no need for atomic*/
+       }
+    }
+
+    if(threadIdx.x == 0) 
+    {
+        atomicAdd(output, in_s[0]);
+    }
+}
+#endif
+
+#ifdef THREADCOARSENING
+__global__ void reduce_sum_threadcoarsening(float *output, const float *in) 
+{
+    /*assume that the kernal is launched with 
+      dim3 blockDim(BLOCK_SIZE, 1, 1);
+      dim3 gridDim(ceil(in.size()/(2*BLOCK_SIZE*COARSE_FACTOR)),1,1); //Note that we are dividing by segment size
+      */
+
+    __shared__ float in_s[BLOCK_SIZE];
+
+    unsigned int segment =  COARSE_FACTOR*2*blockDim.x*blockIdx.x;
+    unsigned int i = segment + threadIdx.x;
+
+    in_s[threadIdx.x] = 0.;
+    float sum = 0.;
+    for (int c=0; c < 2*COARSE_FACTOR; ++c) 
+    {
+        sum += in[i + c*blockDim.x];
+    }
+    in_s[threadIdx.x] = sum;
+
+    for(unsigned int stride = blockDim.x/2; stride >=1 ; stride /= 2) 
+    {
+       __syncthreads();
+
+       if(threadIdx.x < stride) 
+       {
+           in_s[threadIdx.x] += in_s[threadIdx.x + stride]; /*no need for atomic*/
+       }
+    }
+
+    if(threadIdx.x == 0) 
+    {
+        atomicAdd(output, in_s[0]);
     }
 }
 #endif
