@@ -146,21 +146,24 @@ __global__ void convolution_tiled_constmem_type2(float *M, const float *A, const
     __shared__ float tile_A[IN_TILE_SIZE][IN_TILE_SIZE];
 
     /*load tile*/
-    for(int j=0; j < IN_TILE_SIZE; j += OUT_TILE_SIZE  + 10000) 
+    /*Note here that i and j start as threadIdx.x and threadIdx.y, respectively*/
+    /*Each thread at least loads 1 element, while other threads load extra element depending on the difference between IN and OUT tile sizes*/
+    for(int j=threadIdx.y; j < IN_TILE_SIZE; j += OUT_TILE_SIZE) 
     {
-        for(int i=0; i < IN_TILE_SIZE; i += OUT_TILE_SIZE + 10000 )	
+        for(int i=threadIdx.x; i < IN_TILE_SIZE; i += OUT_TILE_SIZE)	
         {
-            /*global Ids of input tile*/		
-            int inRow = outRow - FILTER_RADIUS + j;
-            int inCol = outCol - FILTER_RADIUS + i;
-
+            /*global Ids of input tile, check the offset in the bracket*/		
+            int inRow = j + (blockIdx.y*OUT_TILE_SIZE - FILTER_RADIUS);
+            int inCol = i + (blockIdx.x*OUT_TILE_SIZE - FILTER_RADIUS);
+           
+	    /*now we need to make sure whether inRow and inCol is within bounds*/
             if(inRow >=0 && inRow < Height && inCol >=0 && inCol < Width) 
-            {
-                tile_A[threadIdx.y+j][threadIdx.x+i] = A[inRow*Width + inCol];
+            {  
+                tile_A[j][i] = A[inRow*Width + inCol];
     	    }
             else 
             {
-                tile_A[threadIdx.y+j][threadIdx.x+i] = 0.f;
+                tile_A[j][i] = 0.f;
             }
         }
     }
@@ -169,12 +172,17 @@ __global__ void convolution_tiled_constmem_type2(float *M, const float *A, const
 
     if(outRow < Height && outCol < Width) 
     {
+	/*Note that for thread associated with M[outRow][outCol], tile_A[threadIdx.y][threadIdx.x] would refer to 
+	  the beginning of the element with which we would have to multiply the filter*/
         float sum = 0.f;	    
         for(int j=0; j<FilterSize; ++j) 
         {
             for(int i=0; i<FilterSize; ++i) 
             {
-                sum += tile_A[threadIdx.y + j][threadIdx.x + i] * F[j][i];	    
+		int tile_row = threadIdx.y + j;
+	        int tile_col = threadIdx.x + i;
+                   
+                sum += tile_A[tile_row][tile_col] * F[j][i];	    
             }
         }
         M[outRow*Width + outCol] = sum;

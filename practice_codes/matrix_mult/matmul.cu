@@ -23,16 +23,16 @@ const int COARSE_FACTOR = 4;
 #ifdef NAIVE
 __global__ void matmul_naive(float *M, const float *A, const float *B, const int Height, const int Width, const int InnerSize) 
 {
-    /*            B      col 
+    /*                   col 
+                       [.|.|.] B (I x W)
+                       [.|.|.]     
                        [.|.|.]
-                       [.|.|.]      I x H
                        [.|.|.]
-                       [.|.|.]
-        A                        
-            [.|.|.|.]  [.|.|.]  M 
+                                          
+            [.|.|.|.]  [.|.|.]   
        row  [.|.|.|.]  [.|.|.]
             [.|.|.|.]  [.|.|.]
-	     H x I      H x W         	     
+	    A (H x I)  M (H x W)         	     
        */
 
     int col = blockIdx.x*blockDim.x + threadIdx.x;
@@ -215,14 +215,17 @@ int main (int argc, char* argv[])
     const int matM_memsize = Height*Width*sizeof(float);
 
 #ifdef NAIVE
-    dim3 dimGrid(1, ceil(Height/static_cast<float>(BLOCK_ROWS)), 1);
+    /*Note: ceil(Height/static_cast<float>(BLOC_ROWS)) = (Height-1)/BLOCK_ROWS + 1  if Height and TILE_SIZE are integers*/
+
+    dim3 dimGrid(1, (Height-1)/BLOCK_ROWS + 1, 1);
     dim3 dimBlock(Width, BLOCK_ROWS, 1);
 #elif TILED
-    dim3 dimGrid(ceil(Width/static_cast<float>(TILE_SIZE)), ceil(Height/static_cast<float>(TILE_SIZE)), 1);
+    dim3 dimGrid((Width-1)/TILE_SIZE + 1, (Height-1)/TILE_SIZE + 1, 1);
     dim3 dimBlock(TILE_SIZE, TILE_SIZE, 1);
 #elif TILED_COARSENED
     /*Note loading fewer threads in a block than the elements they will be responsible to process*/
-    dim3 dimGrid(ceil(Width/static_cast<float>(TILE_SIZE*COARSE_FACTOR)), ceil(Height/static_cast<float>(TILE_SIZE)), 1);
+    dim3 dimGrid((Width-1)/(TILE_SIZE*COARSE_FACTOR) + 1, (Height-1)/TILE_SIZE + 1, 1);
+    //dim3 dimGrid(ceil(Width/static_cast<float>(TILE_SIZE*COARSE_FACTOR)), ceil(Height/static_cast<float>(TILE_SIZE)), 1);
     dim3 dimBlock(TILE_SIZE, TILE_SIZE, 1); 
 #endif
 

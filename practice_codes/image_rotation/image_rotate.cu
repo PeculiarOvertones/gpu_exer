@@ -71,9 +71,11 @@ __global__ void rotate_matrix_sharedtile(float *output, const float *input, cons
     {
         //swapping columns after transpose
 	//we rotate along x because we didn't actually transpose tile after reading.
+        //new refers to after rotation
 	int new_tx = threadIdx.x - (TILE_SIZE-1);
 	int new_ty = threadIdx.y+j;
-
+	 
+	//so we first rotation along x then transpose.
         output[(inRow+j)*Height + inCol] = tile[std::abs(new_tx)][new_ty];
     }
 }
