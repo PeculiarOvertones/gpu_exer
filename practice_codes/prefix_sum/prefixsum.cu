@@ -119,7 +119,7 @@ __global__ void reduce_sum_naive(float *Y, const float *X, unsigned int N)
     /*copy to global memory*/
     if(i < N) 
     {
-        Y[i] = write_ptr[threadIdx.x];
+        Y[i] = read_ptr[threadIdx.x];
     }
 }
 #endif

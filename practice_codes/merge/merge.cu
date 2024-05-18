@@ -50,14 +50,14 @@ int co_rank(int k, int* A, int m, int* B, int n)
     {
         if(A[i-1] > B[j] && i > 0 &&  j < n) 
 	{
-	    delta = i - i_low >> 1; //ceil((i-i_low)/2)
+	    delta = (i - i_low + 1) >> 1; //ceil((i-i_low)/2)
 	    i = i - delta;
 	    j_low = j;
 	    j = j + delta;
 	}
 	else if(B[j-1] >= A[i] && j > 0 && i < m)
 	{
-	    delta = j - j_low >> 1; 
+	    delta = (j - j_low + 1) >> 1; 
 	    j = j - delta;
 	    i_loc = i;
 	    i = i + delta;

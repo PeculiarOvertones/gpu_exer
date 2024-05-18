@@ -70,7 +70,10 @@ __global__ void hist_privatization(float *hist, const float *data, unsigned int 
 
     __syncthreads();
 
+
     /*commit to global memory (all blocks commit to global memory)*/
+    /*Each thread is assigned to a bin. 
+      Number of bins can be greater than the number of threads in a block*/
     for(int bin=threadIdx.x; bin < NUM_BINS; bin+= blockDim.x ) 
     {
         int binValue = hist_s[bin];
