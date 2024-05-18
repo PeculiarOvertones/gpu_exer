@@ -332,7 +332,6 @@ int main (int argc, char* argv[])
 
     cudaMemcpy(h_M, d_M, matM_memsize, cudaMemcpyDeviceToHost); 
   
-    cudaDeviceSynchronize();
 #ifdef PRINT
     std::cout << "Writing M matrix:\n";
     print_matrix(h_M, Width, Height);
