@@ -25,15 +25,14 @@
   **/
 
 #ifdef NAIVE
-const int BLOCK_ROWS = 32; 
+const int BLOCK_ROWS = 4;
 #elif defined(TILED) || defined(TILED_COARSENED)
-const int TILE_SIZE = 32;
+const int TILE_SIZE = 16;
 #endif
 
 #ifdef TILED_COARSENED
-const int COARSE_FACTOR = 4;
+const int COARSE_FACTOR = 2;
 #endif
-
 
 #ifdef NAIVE
 __global__ void matmul_naive(float *M, const float *A, const float *B, const int Height, const int Width, const int InnerSize) 
@@ -44,6 +43,7 @@ __global__ void matmul_naive(float *M, const float *A, const float *B, const int
     if((row < Height) && (col < Width)) 
     {
     	float sum = 0.f;    
+        #pragma unroll
         for(int i = 0; i < InnerSize; ++i) 
 	    {
 	        sum += A[row*InnerSize + i] * B[i*Width + col];     	
@@ -134,7 +134,7 @@ __global__ void matmul_tiled_coarsened(float *M, const float *A, const float *B,
 
         int rowB = (istart + threadIdx.y);
         for(int c=0; c<COARSE_FACTOR; ++c) 
-	{
+	    {
             /*load tile B*/
             int colB = c*TILE_SIZE + col;
 
@@ -152,12 +152,15 @@ __global__ void matmul_tiled_coarsened(float *M, const float *A, const float *B,
             }
 
             __syncthreads();
-	}
+	    }
     }
 
-    if(row < Height && col < Width) 
-    {
-        for(int c=0; c<COARSE_FACTOR; ++c) M[row*Width + (c*TILE_SIZE + col)] = sum[c];
+    if(row < Height) {
+        for(int c=0; c<COARSE_FACTOR; ++c) {
+            int col_glo = c*TILE_SIZE + col;
+
+            if(col_glo < Width) M[row*Width + col_glo] = sum[c];
+        }
     }
 }
 #endif
@@ -209,9 +212,9 @@ int main (int argc, char* argv[])
 { 
     /*define dimensions*/ 
     /*A (Height x InnerSize)  x B (InnerSize x Width)  = M (Height x Width) **/
-    const int Height = 512;
-    const int Width  = 512;
-    const int InnerSize = 1024;
+    const int Height = 256;
+    const int Width  = 256;
+    const int InnerSize = 2048;
 
     const int matA_memsize = Height*InnerSize*sizeof(float);
     const int matB_memsize = InnerSize*Width*sizeof(float);
@@ -329,6 +332,7 @@ int main (int argc, char* argv[])
 
     cudaMemcpy(h_M, d_M, matM_memsize, cudaMemcpyDeviceToHost); 
   
+    cudaDeviceSynchronize();
 #ifdef PRINT
     std::cout << "Writing M matrix:\n";
     print_matrix(h_M, Width, Height);
