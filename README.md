@@ -1,6 +1,7 @@
 Practice codes for GPU optimization.
-- I wrote these codes while studying "Programming Massively Parallel Processors" (4th edition).
-- For these codes, check preprocessor directives at the beginning of the code to enable/test particular optimization.
+- Example codes I have tried while studying GPU programming with CUDA.
+- From resources usch as, "Programming Massively Parallel Processors" (4th edition), cuda_training_series from NVIDIA,
+  some other interesting problems.
+- For each code, there are multiple kernels with different optimizations enabled based on preprocessor directives. Check them at the beginning of the code before compiling.
 - e.g.: nvcc -arch=sm_70 -DTILED -o solver.x matmul.cu 
-- Note: convolution, image_rotation, matrix_mult, streams are cleaned up.
-- Need to cleanup merge, prefix_sum, histogram, atomic.
+- These codes need cleaning: merge, prefix_sum, histogram, atomic. I will do it soon.
