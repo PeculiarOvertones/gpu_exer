@@ -3,48 +3,51 @@
 #include <math.h>
 #include <iostream>
 #include <assert.h>
+#include <nvtx3/nvToolsExt.h>
 /** Compile with one of three options for matrix multiplication:
-  * NAIVE, TILED, or TILED_COARSENED
-  * For Printing use flag: PRINT
-  * e.g. nvcc -DTILED -DPRINT matmul.cu -o solver.x
+  * NAIVE: naive matmul with blocks.
+  * TILED: matmul with 2D tiles
+  * TILED_COARSENED: more work per thread 
+    (loading fewer threads in a block than 
+     the elements they will be responsible to process)
+  * PRINT: printing matrices for debugging
+  * e.g. nvcc -arch=sm_70 -DTILED -DPRINT matmul.cu -o solver.x
+  *
+  *                                  [.|.|.] B (InnerSize x Width)
+  *                                  [.|.|.]     
+  *                                  [.|.|.]
+  *                                  [.|.|.]
+  *                                                     
+  *          [.|.|.|.]               [.|.|.]   
+  *          [.|.|.|.]               [.|.|.]
+  *          [.|.|.|.]               [.|.|.]
+  * 	     A (Height x InnerSize)  M (Height x Width)         	     
   **/
 
 #ifdef NAIVE
-const int BLOCK_ROWS = 8; 
+const int BLOCK_ROWS = 4;
 #elif defined(TILED) || defined(TILED_COARSENED)
-const int TILE_SIZE = 32;
+const int TILE_SIZE = 16;
 #endif
 
 #ifdef TILED_COARSENED
-const int COARSE_FACTOR = 4;
+const int COARSE_FACTOR = 2;
 #endif
-
 
 #ifdef NAIVE
 __global__ void matmul_naive(float *M, const float *A, const float *B, const int Height, const int Width, const int InnerSize) 
 {
-    /*            B      col 
-                       [.|.|.]
-                       [.|.|.]      I x H
-                       [.|.|.]
-                       [.|.|.]
-        A                        
-            [.|.|.|.]  [.|.|.]  M 
-       row  [.|.|.|.]  [.|.|.]
-            [.|.|.|.]  [.|.|.]
-	     H x I      H x W         	     
-       */
-
     int col = blockIdx.x*blockDim.x + threadIdx.x;
     int row = blockIdx.y*blockDim.y + threadIdx.y;
  
-    if(row < Height && col < Width) 
+    if((row < Height) && (col < Width)) 
     {
-	float sum = 0.f;    
+    	float sum = 0.f;    
+        #pragma unroll
         for(int i = 0; i < InnerSize; ++i) 
-	{
-	    sum += A[row*InnerSize + i] * B[i*Width + col];     	
-	}
+	    {
+	        sum += A[row*InnerSize + i] * B[i*Width + col];     	
+	    }
         M[row*Width+col] = sum;
     }
 }
@@ -100,7 +103,6 @@ __global__ void matmul_tiled(float *M, const float *A, const float *B, const int
     /*Note: Another way*/
     //  for(int phase=0; phase < (InnerSize/TILE_SIZE); ++phase) 
     //  {
-    //    //In this case
     //    int colA = (phase*TILE_SIZE + threadIdx.x);
     //    int rowB = (phase*TILE_SIZE + threadIdx.y);
 }
@@ -132,7 +134,7 @@ __global__ void matmul_tiled_coarsened(float *M, const float *A, const float *B,
 
         int rowB = (istart + threadIdx.y);
         for(int c=0; c<COARSE_FACTOR; ++c) 
-	{
+	    {
             /*load tile B*/
             int colB = c*TILE_SIZE + col;
 
@@ -150,12 +152,15 @@ __global__ void matmul_tiled_coarsened(float *M, const float *A, const float *B,
             }
 
             __syncthreads();
-	}
+	    }
     }
 
-    if(row < Height && col < Width) 
-    {
-        for(int c=0; c<COARSE_FACTOR; ++c) M[row*Width + (c*TILE_SIZE + col)] = sum[c];
+    if(row < Height) {
+        for(int c=0; c<COARSE_FACTOR; ++c) {
+            int col_glo = c*TILE_SIZE + col;
+
+            if(col_glo < Width) M[row*Width + col_glo] = sum[c];
+        }
     }
 }
 #endif
@@ -202,13 +207,14 @@ void check_error(const float* h_output, const float* answer_check, const int siz
     if(test_passed) std::cout << "Matrix Multiplication Test Passed! \n";
 }
 
+
 int main (int argc, char* argv[])
 { 
     /*define dimensions*/ 
     /*A (Height x InnerSize)  x B (InnerSize x Width)  = M (Height x Width) **/
-    const int Height = 1024;
-    const int InnerSize = 512;
-    const int Width = 1024;
+    const int Height = 256;
+    const int Width  = 256;
+    const int InnerSize = 2048;
 
     const int matA_memsize = Height*InnerSize*sizeof(float);
     const int matB_memsize = InnerSize*Width*sizeof(float);
@@ -218,11 +224,12 @@ int main (int argc, char* argv[])
     dim3 dimGrid(1, ceil(Height/static_cast<float>(BLOCK_ROWS)), 1);
     dim3 dimBlock(Width, BLOCK_ROWS, 1);
 #elif TILED
-    dim3 dimGrid(ceil(Width/static_cast<float>(TILE_SIZE)), ceil(Height/static_cast<float>(TILE_SIZE)), 1);
+    dim3 dimGrid(ceil(Width/static_cast<float>(TILE_SIZE)), 
+                 ceil(Height/static_cast<float>(TILE_SIZE)), 1);
     dim3 dimBlock(TILE_SIZE, TILE_SIZE, 1);
 #elif TILED_COARSENED
-    /*Note loading fewer threads in a block than the elements they will be responsible to process*/
-    dim3 dimGrid(ceil(Width/static_cast<float>(TILE_SIZE*COARSE_FACTOR)), ceil(Height/static_cast<float>(TILE_SIZE)), 1);
+    dim3 dimGrid(ceil(Width/static_cast<float>(TILE_SIZE*COARSE_FACTOR)), 
+                 ceil(Height/static_cast<float>(TILE_SIZE)), 1);
     dim3 dimBlock(TILE_SIZE, TILE_SIZE, 1); 
 #endif
 
@@ -233,12 +240,21 @@ int main (int argc, char* argv[])
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, devID);
     std::cout << "\nDevice: " << prop.name << "\n";
-    std::cout << "Matrix sizes (height, innersize, width): "    << std::setw(10) << Height << std::setw(10) << InnerSize << std::setw(10) << Width << "\n";
+    std::cout << "Matrix sizes (height, innersize, width): " << std::setw(10) 
+              << Height << std::setw(10) 
+              << InnerSize << std::setw(10) 
+              << Width << "\n";
+
 #if defined(TILED) || defined(TILED_COARSENED)
-    std::cout << "TILE_SIZE (height, width): " << std::setw(10) << TILE_SIZE  << std::setw(10) << TILE_SIZE << "\n";
+    std::cout << "TILE_SIZE (height, width): " << std::setw(10) 
+              << TILE_SIZE  << std::setw(10) << TILE_SIZE << "\n";
 #endif
-    std::cout << "dimGrid (x,y,z):  "<< std::setw(10) << dimGrid.x  << std::setw(10) << dimGrid.y << std::setw(10) << dimGrid.z << "\n";
-    std::cout << "dimBlock (x,y,z): "<< std::setw(10) << dimBlock.x << std::setw(10) << dimBlock.y << std::setw(10) << dimBlock.z << "\n";
+    std::cout << "dimGrid (x,y,z):  "<< std::setw(10) << dimGrid.x  
+                                     << std::setw(10) << dimGrid.y 
+                                     << std::setw(10) << dimGrid.z << "\n";
+    std::cout << "dimBlock (x,y,z): "<< std::setw(10) << dimBlock.x 
+                                     << std::setw(10) << dimBlock.y 
+                                     << std::setw(10) << dimBlock.z << "\n";
 
     /*cudaSetDevice(devID)*/
 
@@ -259,27 +275,27 @@ int main (int argc, char* argv[])
 
     /*initializing input array*/
     for (int j=0; j < Height; ++j) {
-	for (int i=0; i < InnerSize; ++i) {
-	    h_A [j*InnerSize + i] = static_cast<float>(j);
-	}
+	    for (int i=0; i < InnerSize; ++i) {
+	        h_A [j*InnerSize + i] = static_cast<float>(j);
+	    }
     }
     for (int j=0; j < InnerSize; ++j) {
-	for (int i=0; i < Width; ++i) {
-	    h_B [j*Width + i] = static_cast<float>(j);
-	}
+	    for (int i=0; i < Width; ++i) {
+	        h_B [j*Width + i] = static_cast<float>(j);
+	    }
     }
     /*correct answer for error checking*/
     for (int row=0; row < Height; ++row) {
-	for (int col=0; col < Width; ++col) {
-	    float sum = 0.f;
-	    for (int i=0; i < InnerSize; ++i) {
-	        sum += h_A[row*InnerSize + i] * h_B[i*Width + col];
+	    for (int col=0; col < Width; ++col) {
+	        float sum = 0.f;
+	        for (int i=0; i < InnerSize; ++i) {
+	            sum += h_A[row*InnerSize + i] * h_B[i*Width + col];
+	        }
+	        M_check [row*Width + col] = sum;
 	    }
-	    M_check [row*Width + col] = sum;
-	}
     }
 
-#ifdef PRINT
+    #ifdef PRINT
     std::cout << "Writing A matrix:\n";
     print_matrix(h_A, InnerSize, Height);
 
@@ -288,29 +304,18 @@ int main (int argc, char* argv[])
 
     std::cout << "Writing correct answer for M matrix:\n";
     print_matrix(M_check, Width, Height);
-#endif
-
-
-    ///*check parameters*/
-    //if(Width % TILE_SIZE || Height % TILE_SIZE) {
-    //    std::cout << "Width and Heigh must be a multipler of TILE_SIZE\n";
-    //    goto error_exit;
-    //}
-    //if(TILE_SIZE % BLOCK_ROWS) {
-    //    std::cout << "TILE_SIZE must be a multipler of BLOCK_ROWS\n";
-    //    goto error_exit;
-    //}
+    #endif
 
     cudaMemcpy(d_A, h_A, matA_memsize, cudaMemcpyHostToDevice);
     cudaMemcpy(d_B, h_B, matB_memsize, cudaMemcpyHostToDevice);
 
-//    cudaMemset(d_M, 0, matM_memsize);
     cudaEvent_t startEvent, stopEvent;
     cudaEventCreate(&startEvent);
     cudaEventCreate(&stopEvent);
     float ms;
     cudaEventRecord(startEvent, 0);
 
+    nvtxRangePush("Start Profiling");
 #ifdef NAIVE
     matmul_naive<<<dimGrid, dimBlock>>>(d_M, d_A, d_B, Height, Width, InnerSize);
 #elif TILED
@@ -318,6 +323,7 @@ int main (int argc, char* argv[])
 #elif TILED_COARSENED
     matmul_tiled_coarsened<<<dimGrid, dimBlock>>>(d_M, d_A, d_B, Height, Width, InnerSize);
 #endif
+    nvtxRangePop();
 
     cudaEventRecord(stopEvent, 0);
     cudaEventSynchronize(stopEvent);
@@ -331,9 +337,8 @@ int main (int argc, char* argv[])
     print_matrix(h_M, Width, Height);
 #endif
 
-   check_error(h_M, M_check, Width*Height);
+    check_error(h_M, M_check, Width*Height);
 
-//error_exit:
     /*free memory*/
     cudaEventDestroy(startEvent);
     cudaEventDestroy(stopEvent);

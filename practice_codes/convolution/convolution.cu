@@ -10,6 +10,10 @@
 
 #define FILTER_RADIUS 1
 
+#if defined(NAIVE) || defined(CONSTMEM)
+const int BLOCK_SIZE = 32;
+#endif
+
 #ifndef NAIVE
 __constant__ float F[2*FILTER_RADIUS+1][2*FILTER_RADIUS+1];
 #endif
@@ -111,11 +115,11 @@ __global__ void convolution_tiled_constmem_type1(float *M, const float *A, const
      
     __syncthreads();
 
-    int local_out_rowId = threadIdx.y - FILTER_RADIUS;
-    int local_out_colId = threadIdx.x - FILTER_RADIUS;
-
     if(inRow >=0 && inRow < Height && inCol >=0 && inCol < Width) 
     {
+        int local_out_rowId = threadIdx.y - FILTER_RADIUS;
+        int local_out_colId = threadIdx.x - FILTER_RADIUS;
+
         if(local_out_colId >=0 && local_out_colId  < OUT_TILE_SIZE &&
            local_out_rowId >=0 && local_out_rowId < OUT_TILE_SIZE )
         {
@@ -146,21 +150,24 @@ __global__ void convolution_tiled_constmem_type2(float *M, const float *A, const
     __shared__ float tile_A[IN_TILE_SIZE][IN_TILE_SIZE];
 
     /*load tile*/
-    for(int j=0; j < IN_TILE_SIZE; j += OUT_TILE_SIZE  + 10000) 
+    /*Note here that i and j start as threadIdx.x and threadIdx.y, respectively*/
+    /*Each thread at least loads 1 element, while other threads load extra element depending on the difference between IN and OUT tile sizes*/
+    for(int j=threadIdx.y; j < IN_TILE_SIZE; j += OUT_TILE_SIZE) 
     {
-        for(int i=0; i < IN_TILE_SIZE; i += OUT_TILE_SIZE + 10000 )	
+        for(int i=threadIdx.x; i < IN_TILE_SIZE; i += OUT_TILE_SIZE)	
         {
-            /*global Ids of input tile*/		
-            int inRow = outRow - FILTER_RADIUS + j;
-            int inCol = outCol - FILTER_RADIUS + i;
-
+            /*global Ids of input tile, check the offset in the bracket*/		
+            int inRow = j + (blockIdx.y*OUT_TILE_SIZE - FILTER_RADIUS);
+            int inCol = i + (blockIdx.x*OUT_TILE_SIZE - FILTER_RADIUS);
+           
+	    /*now we need to make sure whether inRow and inCol is within bounds*/
             if(inRow >=0 && inRow < Height && inCol >=0 && inCol < Width) 
-            {
-                tile_A[threadIdx.y+j][threadIdx.x+i] = A[inRow*Width + inCol];
+            {  
+                tile_A[j][i] = A[inRow*Width + inCol];
     	    }
             else 
             {
-                tile_A[threadIdx.y+j][threadIdx.x+i] = 0.f;
+                tile_A[j][i] = 0.f;
             }
         }
     }
@@ -169,12 +176,17 @@ __global__ void convolution_tiled_constmem_type2(float *M, const float *A, const
 
     if(outRow < Height && outCol < Width) 
     {
+	    /* Note that for thread associated with M[outRow][outCol], tile_A[threadIdx.y][threadIdx.x] would refer to 
+	       the beginning of the element with which we would have to multiply the filter */
         float sum = 0.f;	    
         for(int j=0; j<FilterSize; ++j) 
         {
             for(int i=0; i<FilterSize; ++i) 
             {
-                sum += tile_A[threadIdx.y + j][threadIdx.x + i] * F[j][i];	    
+        		int tile_row = threadIdx.y + j;
+	            int tile_col = threadIdx.x + i;
+                   
+                sum += tile_A[tile_row][tile_col] * F[j][i];	    
             }
         }
         M[outRow*Width + outCol] = sum;
@@ -209,21 +221,21 @@ __global__ void convolution_tiled_constmem_cachehalo(float *M, const float *A, c
         {
             for(int i=0; i<FilterSize; ++i) 
             {
-	        int local_A_rowId = threadIdx.y + j - FILTER_RADIUS;
-		int local_A_colId = threadIdx.x + i - FILTER_RADIUS;
+	            int local_A_rowId = threadIdx.y + j - FILTER_RADIUS;
+	         	int local_A_colId = threadIdx.x + i - FILTER_RADIUS;
 
-		/*make sure you are within the local tile*/
-		if(local_A_colId >=0 && local_A_colId < TILE_SIZE && 
-		   local_A_rowId >=0 && local_A_rowId < TILE_SIZE)     
-		{
-                    sum += tile_A[threadIdx.y + j - FILTER_RADIUS][threadIdx.x + i - FILTER_RADIUS] * F[j][i];	    
-		}
+		        /*if thread is within the local tile*/
+		        if(local_A_colId >=0 && local_A_colId < TILE_SIZE && 
+		           local_A_rowId >=0 && local_A_rowId < TILE_SIZE)     
+		        {
+                    sum += tile_A[local_A_rowId][local_A_colId] * F[j][i];	    
+	            }
                 else 
                 {
                     int global_A_rowId = row + j - FILTER_RADIUS;
                     int global_A_colId = col + i - FILTER_RADIUS;
         
-                    /*make sure the global id for accessing A is within the global boundaries*/
+                    /*if global ids for accessing A are within the global boundaries*/
                     if (global_A_colId >= 0 && global_A_colId < Width &&   
                         global_A_rowId >= 0 && global_A_rowId < Height)  
                     {
@@ -284,8 +296,8 @@ int main (int argc, char* argv[])
 { 
     /*define dimensions*/ 
     /*A (Height x InnerSize)  x B (InnerSize x Width)  = M (Height x Width) **/
-    const int Height = 32;
-    const int Width = 32;
+    const int Height = 4096;
+    const int Width = 4096;
     const int FilterSize = 2*FILTER_RADIUS+1;
 
     const int matA_memsize = Height*Width*sizeof(float);
