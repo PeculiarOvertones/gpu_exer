@@ -3,52 +3,39 @@
 #include <math.h>
 #include <iostream>
 #include <assert.h>
-/** Compile with one of three options for matrix multiplication:
-  * NAIVE, CONSTMEM, TILED_CONSTMEM_TYPE_1, TILED_CONSTMEM_TYPE_2, TILED_CONSTMEM_CACHEHALO
-  * For Printing use flag: PRINT
-  **/
 
-#define NUM_BINS 7
-
-#ifdef NAIVE
-const int NUM_BINSE = 32;
-#elif REGISTERTILING_THREADCOARSENING
-const int IN_TILE_SIZE = 32;
-const int OUT_TILE_SIZE = IN_TILE_SIZE - 2*STENCIL_RADIUS;
+/* Compile with one of the following options for histogram:
+ * NAIVE
+ * CONVERGENT
+ * SHAREDMEM
+ * HIERARCHICAL
+ * THREADCOARSENING
+ *
+ * Use PRINT_INPUT for printing input data.
+ **/
+#ifdef THREADCOARSENING
+const int COARSE_FACTOR = 2;
 #endif
 
-
-sum=0;
-for(int i=0; i<length; ++i) {
-
-}
-
-
 #ifdef NAIVE
-__global__ void reduce_sum_naive(float *output, const float *in, unsigned int length) 
+__global__ void reduce_sum_naive(float *output, float *in) 
 {
-    /*assume that the kernal is launched with 
-      dim3 blockDim(ceil(in.size()/2), 1, 1);
-      dim3 gridDim(1,1,1);
-      */
-    /*This ones with better control divergence and memory coalescence*/
+    /* - this kernel doesn't preserve input array. 
+     * - Assume kernel is launched with:
+     *   threadsPerBlock = dataLength/2
+     *   gridDim.x = 1
+     */
 
     unsigned int i = 2*threadIdx.x;
 
     for(unsigned int stride = 1; stride <= blockDim.x ; stride *= 2) {
-       if(threadIdx.x % stride  == 0) 
-       {
-	   if(i+stride < length) 
-	   {
-               in[i] += in[i + stride];
-	   }
+       if(threadIdx.x % stride  == 0) {
+            in[i] += in[i + stride];
        }
-
        __syncthreads();
     }
 
-    if(threadIdx.x == 0) 
-    {
+    if(threadIdx.x == 0) {
         *output = in[0];
     }
 }
@@ -56,65 +43,57 @@ __global__ void reduce_sum_naive(float *output, const float *in, unsigned int le
 
 
 #ifdef CONVERGENT
-__global__ void reduce_sum_convergent(float *output, const float *in, unsigned int length) 
+__global__ void reduce_sum_convergent(float *output, float *in) 
 {
-    /*assume that the kernal is launched with 
-      dim3 blockDim(ceil(in.size()/2), 1, 1);
-      dim3 gridDim(1,1,1);
-      */
-    /*less control divergence and better memory coalescing*/
+    /* - less control divergence and better memory coalescing.
+     * - doesn't preserve input array.
+     * - Assume kernel is launched with:
+     *   threadsPerBlock = dataLength/2
+     *   gridDim.x = 1
+     **/
 
     unsigned int i = threadIdx.x;
 
-    for(unsigned int stride = blockDim.x; stride >=1 ; stride /= 2) 
+    for(unsigned int stride = blockDim.x; stride >=1 ; stride /= 2)
     {
        if(threadIdx.x < stride) 
        {
-	   if(i + stride < length) 
-	   {
-               in[i] += in[i + stride]; /*no need for atomic*/
-	   }
+           in[i] += in[i + stride]; /*no need for atomic*/
        }
        __syncthreads();
     }
-
-    if(threadIdx.x == 0) 
-    {
+    if(threadIdx.x == 0) {
         *output = in[0];
     }
 }
 #endif
 
+
 #ifdef SHAREDMEM
-__global__ void reduce_sum_sharedmem(float *output, const float *in, unsigned int length) 
+__global__ void reduce_sum_sharedmem(float *output, const float *in) 
 {
-    /*assume that the kernal is launched with 
-      dim3 blockDim(ceil(in.size()/2), 1, 1);
-      dim3 gridDim(1,1,1);
-      */
-    /*fewer accesses to global memory*/
+    /* - fewer accesses to global memory.
+     * - preserves input array.
+     * - Assume kernel is launched with:
+     *   threadsPerBlock = dataLength/2
+     *   gridDim.x = 1
+     **/
+    extern __shared__ float sharedmem[];
+    float* in_s = sharedmem;
 
-    __shared__ float in_s[BLOCK_SIZE];
+    unsigned int t = threadIdx.x;
 
-    unsigned int i = threadIdx.x;
+    //load tile and add elements blockDim.x distance away.
+    in_s[t] = in[t] + in[t+blockDim.x];
 
-    in_s[i] = in[i] + in[i+blockDim.x];
-
-    for(unsigned int stride = blockDim.x/2; stride >=1 ; stride /= 2) 
-    {
+    for(unsigned int stride = blockDim.x/2; stride >=1 ; stride /= 2) {
        __syncthreads();
 
-       if(threadIdx.x < stride) 
-       {
-	   if(i + stride < length) 
-	   {
-               in_s[i] += in_s[i + stride]; /*no need for atomic*/
-	   }
+       if(t < stride) {
+           in_s[t] += in_s[t + stride]; /*no need for atomic*/
        }
     }
-
-    if(threadIdx.x == 0) 
-    {
+    if(t == 0) {
         *output = in_s[0];
     }
 }
@@ -124,13 +103,14 @@ __global__ void reduce_sum_sharedmem(float *output, const float *in, unsigned in
 #ifdef HIERARCHICAL
 __global__ void reduce_sum_hierarchical(float *output, const float *in) 
 {
-    /*assume that the kernal is launched with 
-      dim3 blockDim(BLOCK_SIZE, 1, 1);
-      dim3 gridDim(ceil(in.size()/(2*BLOCK_SIZE)),1,1); //Note that we are dividing by segment size
-      */
-    /*worked with large data*/
+    /* - works for large data.
+     * - preserves input array.
+     * - Assume kernel is launched with:
+     *   gridDim.x = dataLength/(2*threadsPerBlock));
+     **/
 
-    __shared__ float in_s[BLOCK_SIZE];
+    extern __shared__ float sharedmem[];
+    float* in_s = sharedmem;
 
     unsigned int segment =  2*blockDim.x*blockIdx.x;
     unsigned int i = segment + threadIdx.x;
@@ -154,17 +134,19 @@ __global__ void reduce_sum_hierarchical(float *output, const float *in)
 }
 #endif
 
+
 #ifdef THREADCOARSENING
 __global__ void reduce_sum_threadcoarsening(float *output, const float *in) 
 {
-    /*assume that the kernal is launched with 
-      dim3 blockDim(BLOCK_SIZE, 1, 1);
-      dim3 gridDim(ceil(in.size()/(2*BLOCK_SIZE*COARSE_FACTOR)),1,1); //Note that we are dividing by segment size
-      */
+    /* - works for large data.
+     * - preserves input array.
+     * - Assume kernel is launched with:
+     *   gridDim.x = dataLength/(2*COARSE_FACTOR*threadsPerBlock));
+     **/
+    extern __shared__ float sharedmem[];
+    float* in_s = sharedmem;
 
-    __shared__ float in_s[BLOCK_SIZE];
-
-    unsigned int segment =  COARSE_FACTOR*2*blockDim.x*blockIdx.x;
+    unsigned int segment =  2*COARSE_FACTOR*blockDim.x*blockIdx.x;
     unsigned int i = segment + threadIdx.x;
 
     in_s[threadIdx.x] = 0.;
@@ -184,7 +166,6 @@ __global__ void reduce_sum_threadcoarsening(float *output, const float *in)
            in_s[threadIdx.x] += in_s[threadIdx.x + stride]; /*no need for atomic*/
        }
     }
-
     if(threadIdx.x == 0) 
     {
         atomicAdd(output, in_s[0]);
@@ -193,165 +174,94 @@ __global__ void reduce_sum_threadcoarsening(float *output, const float *in)
 #endif
 
 
-void set_zero(float *M) 
-{
-    if(M != NULL) 
-    {	
-        int size = sizeof(M)/sizeof(M[0]);
-
-	std::cout << "setting array of size: " << size << " to zero\n";
-        for (int i = 0; i < size; ++i) 
-        {
-            M[i] = 0;    
-        }
-    }
-}
-
-
-void print_matrix(const float *M, int COL, int ROW) 
-{
-    for (int row = 0; row < ROW; ++row) 
-    {
-        for (int col = 0; col < COL; ++col) 
-	{
-            std::cout << std::setw(5) << M[row*COL + col];
-	}
-        std::cout << "\n";
+void printData(const float* data, int length) {
+    std::cout << "Data array: \n";
+    for (int i = 0; i < length; ++i) {
+        std::cout << data[i];
+        if ((i + 1) % 50 == 0)
+            std::cout << "\n";
+        else if (i + 1 != length)
+            std::cout << ", ";
     }
     std::cout << "\n";
 }
 
 
-void check_error(const float* h_output, const float* answer_check, const int size) {
+/* initialize data and compute reduction sum */
+void initializeDataAndComputeReduction(float* h_input, float& output, unsigned int dataLength) {
+    float sum = 0.0f;
 
-    bool test_passed = true;
-    for(int n=0; n<size; ++n) {	
-        if(h_output[n] != answer_check[n]) {
-           std::cout << "error: n, output, correct_ans:" << std::setw(10) << n << std::setw(10) << h_output[n] << std::setw(10) << answer_check[n] << "\n";
-	   test_passed = false;
-           break; 	    
-        }
+    // Seed for reproducibility (optional)
+    srand(time(NULL));
+
+    for (unsigned int i = 0; i < dataLength; ++i) {
+        //h_input[i] = static_cast<float>(rand()) / RAND_MAX;  
+        h_input[i] = static_cast<float>(rand() % 10);  
+        sum += h_input[i];  
     }
-    if(test_passed) std::cout << "Matrix Convolution Test Passed! \n";
+    output = sum;
 }
 
+
 int main (int argc, char* argv[])
-{ 
-    /*define dimensions*/ 
-    /*A (Height x InnerSize)  x B (InnerSize x Width)  = M (Height x Width) **/
-    const int N = 512;
-    const int FilterSize = 2*FILTER_RADIUS+1;
+{
+    /* make sure dataLength is a power of 2, 
+       otherwise pad data with zeros */
+    const int dataLength = 4096;
 
-    const int matA_memsize = Height*Width*sizeof(float);
-    const int matM_memsize = Height*Width*sizeof(float);
-    const int matF_memsize = FilterSize*FilterSize*sizeof(float);
+    int data_memsize = sizeof(float)*dataLength;
 
-#ifdef NAIVE 
-    dim3 dimGrid(ceil(N/static_cast<float>(BLOCK_SIZE)), 
-		 ceil(N/static_cast<float>(BLOCK_SIZE), 
-		 ceil(N/static_cast<float>(BLOCK_SIZE)));
+    std::cout << "dataLength: "   << dataLength << "\n";
+    std::cout << "data size in (GB): " << data_memsize / std::pow(1024,3) << "\n";
 
-    dim3 dimBlock(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE);
-    std::cout << "cubic BLOCK_SIZE: " << std::setw(10) << BLOCK_SIZE  << "\n";
 
-#elif REGISTERTILING_THREADCOARSENING
-    dim3 dimGrid(ceil(N/static_cast<float>(OUT_TILE_SIZE)), 
-	         ceil(N/static_cast<float>(OUT_TILE_SIZE)), 
-		 ceil(N/static_cast<float>(OUT_TILE_SIZE));
-
-    dim3 dimBlock(IN_TILE_SIZE, IN_TILE_SIZE, IN_TILE_SIZE);
-    std::cout << "IN_TILE_SIZE, OUT_TILE_SIZE (square): " << std::setw(10) << IN_TILE_SIZE  << std::setw(10) << OUT_TILE_SIZE << "\n";
+#if defined(HIERARCHICAL) || defined(THREADCOARSENING)
+    int threadsPerBlock = 64;
+#else 
+    int threadsPerBlock = dataLength/2;
 #endif
+
+    int blockSize = threadsPerBlock*2;
+#ifdef THREADCOARSENING
+    blockSize *= COARSE_FACTOR;
+#endif
+    int blocksPerGrid = (dataLength - 1)/blockSize + 1;
+
+    std::cout << "\nblocks per grid: "   << blocksPerGrid << "\n";
+    std::cout << "threads per block: " << threadsPerBlock << "\n";
 
     int devID=0;
     if(argc > 1) devID = atoi(argv[1]);
 
-    /*print cuda device properties*/
-    cudaDeviceProp prop;
-    cudaGetDeviceProperties(&prop, devID);
-    std::cout << "\nDevice: " << prop.name << "\n";
-    std::cout << "Matrix sizes (height, width, filter size): "    << std::setw(10) << Height << std::setw(10) << Width << std::setw(10) << FilterSize << "\n";
-    std::cout << "dimGrid (x,y,z):  "<< std::setw(10) << dimGrid.x  << std::setw(10) << dimGrid.y << std::setw(10) << dimGrid.z << "\n";
-    std::cout << "dimBlock (x,y,z): "<< std::setw(10) << dimBlock.x << std::setw(10) << dimBlock.y << std::setw(10) << dimBlock.z << "\n";
-
-    std::cout << "\nconstant memory (KB): " << prop.totalConstMem/1024 << "\n";
-    std::cout << "total global memory (GB): " << prop.totalGlobalMem/(pow(1024,3)) << "\n";
-    std::cout << "shared memory per block (KB): " << prop.sharedMemPerBlock/1024 << "\n";
-    std::cout << "shared memory per multiprocessor (KB): " << prop.sharedMemPerMultiprocessor/1024 << "\n";
-    std::cout << "register per block: " << prop.regsPerBlock << "\n";
-    std::cout << "register per multiprocessor: " << prop.regsPerMultiprocessor << "\n";
-    std::cout << "multiProcessorCount: " << prop.multiProcessorCount << "\n";
-    std::cout << "warpSize: " << prop.warpSize<< "\n";
-    /*cudaSetDevice(devID)*/
+    cudaError_t err = cudaSetDevice(devID);
+    if (err != cudaSuccess) {
+        std::cerr << "Failed to set device: " << cudaGetErrorString(err) << "\n";
+        return -1;
+    }
 
     /*define arrays on host and device*/
-    /*A*B = M*/
-    float* h_A = (float *) malloc(matA_memsize);
-    float* h_F = (float *) malloc(matF_memsize);
-    float* h_M = (float *) malloc(matM_memsize);
+    float* h_input  = (float*) malloc(data_memsize);
+    float h_output = 0.;
+    float output_check = 0.;
 
-    float* M_check = (float *) malloc(matM_memsize);
+    float* d_input = NULL;
+    cudaMalloc(&d_input, data_memsize);
 
-    float* d_A = NULL;
-    cudaMalloc(&d_A, matA_memsize);
-    float* d_F = NULL;
-    cudaMalloc(&d_F, matF_memsize);
-    float* d_M = NULL;
-    cudaMalloc(&d_M, matM_memsize);
+    float* d_output = NULL;
+    cudaMalloc(&d_output, sizeof(float));
 
-    /*initializing input array*/
-    for (int j=0; j < Height; ++j) {
-	for (int i=0; i < Width; ++i) {
-	    h_A [j*Width + i] = static_cast<float>(j);
-	}
-    }
-    for (int j=0; j < FilterSize; ++j) {
-	for (int i=0; i < FilterSize; ++i) {
-	    h_F [j*FilterSize + i] = static_cast<float>((j));
-	}
-    }
-    /*correct answer for error checking*/
-    for (int row=0; row < Height; ++row) 
-    {
-	for (int col=0; col < Width; ++col) 
-	{
-	    float sum = 0.f;
-            for(int j =  0; j < FilterSize; ++j) 
-	    {
-                for(int i = 0; i < FilterSize; ++i) 
-	        {
-	            int inCol = col + i - FILTER_RADIUS; 		    
-	            int inRow = row + j - FILTER_RADIUS;
-	            if(inRow >= 0 && inRow < Height && inCol >=0 && inCol < Width) 
-	            {
-                        sum += h_A[inRow*Width + inCol] * h_F[j*FilterSize + i];     
-	            }
-	        }
-	    }
-	    M_check [row*Width + col] = sum;
-	}
-    }
+    initializeDataAndComputeReduction(h_input, output_check, dataLength);
 
-#ifdef PRINT
-    std::cout << "\nWriting A matrix:\n";
-    print_matrix(h_A, Width, Height);
-
-    std::cout << "Writing Filter F:\n";
-    print_matrix(h_F, FilterSize, FilterSize);
-
-    std::cout << "Writing correct answer for M matrix:\n";
-    print_matrix(M_check, Width, Height);
+#ifdef PRINT_INPUT
+    std::cout << "Input: \n";
+    printData(h_input, dataLength);
 #endif
 
-    cudaMemcpy(d_A, h_A, matA_memsize, cudaMemcpyHostToDevice);
+    std::cout << "Correct Output: " << output_check << "\n";
 
-#ifdef NAIVE
-    cudaMemcpy(d_F, h_F, matF_memsize, cudaMemcpyHostToDevice);
-#else  //use constant memory
-    cudaMemcpyToSymbol(F, h_F, matF_memsize);
-#endif
+    cudaMemcpy(d_input, h_input, data_memsize, cudaMemcpyHostToDevice);
+    cudaMemset(d_output, 0, sizeof(float));
 
-    cudaMemset(d_M, 0, matM_memsize);
     cudaEvent_t startEvent, stopEvent;
     cudaEventCreate(&startEvent);
     cudaEventCreate(&stopEvent);
@@ -359,9 +269,17 @@ int main (int argc, char* argv[])
     cudaEventRecord(startEvent, 0);
 
 #ifdef NAIVE
-    stencil_naive<<<dimGrid, dimBlock>>>(d_out, d_in, N);
-#elif REGISTERTILING_THREADCOARSENING
-    stencil_registertiling_threadcoarsening<<<dimGrid, dimBlock>>>(d_out, d_in, N);
+    reduce_sum_naive<<<blocksPerGrid, threadsPerBlock>>>(d_output, d_input);
+#elif CONVERGENT
+    reduce_sum_convergent<<<blocksPerGrid, threadsPerBlock>>>(d_output, d_input);
+#elif SHAREDMEM
+    reduce_sum_sharedmem<<<blocksPerGrid, threadsPerBlock, threadsPerBlock>>>(d_output, d_input);
+#elif HIERARCHICAL
+    reduce_sum_hierarchical<<<blocksPerGrid, threadsPerBlock, threadsPerBlock>>>
+                           (d_output, d_input);
+#elif THREADCOARSENING
+    reduce_sum_threadcoarsening<<<blocksPerGrid, threadsPerBlock, threadsPerBlock>>>
+                               (d_output, d_input);
 #endif
 
     cudaEventRecord(stopEvent, 0);
@@ -369,30 +287,35 @@ int main (int argc, char* argv[])
     cudaEventElapsedTime(&ms, startEvent, stopEvent);
     std::cout << "\nElapsed time to run kernel (ms): " << ms << "\n";
 
-    cudaMemcpy(h_M, d_M, matM_memsize, cudaMemcpyDeviceToHost); 
-  
-#ifdef PRINT
-    std::cout << "Writing M matrix:\n";
-    print_matrix(h_M, Width, Height);
-#endif
+    //no need for device synchronize here since event synchronize is used before.
+    err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        std::cerr << "Kernel execution failed: " << cudaGetErrorString(err) << std::endl;
+        return -1;
+    }
 
-   check_error(h_M, M_check, Width*Height);
+    cudaMemcpy(&h_output, d_output, sizeof(float), cudaMemcpyDeviceToHost);
 
-//error_exit:
+    std::cout << "GPU computed Output: " << h_output << "\n";
+
+    if(std::fabs(h_output - output_check) < 1e-8) {
+        std::cout << "Reduction Test Passed!\n";
+    }
+    else {
+    std::cout << "Reduction Test Failed! correct value: " << output_check 
+              << " GPU value: " << h_output << "\n";
+    }
+
     /*free memory*/
     cudaEventDestroy(startEvent);
     cudaEventDestroy(stopEvent);
 
-    free(h_A);
-    free(h_F);
-    free(h_M);
-    free(M_check);
+    free(h_input); h_input = NULL;
 
-    cudaFree(d_A);
-    cudaFree(d_F);
-    cudaFree(d_M);
+    cudaFree(d_input); d_input = NULL;
+    cudaFree(d_output); d_output = NULL;
 
     cudaDeviceReset();
     return 0;
-}
 
+}
