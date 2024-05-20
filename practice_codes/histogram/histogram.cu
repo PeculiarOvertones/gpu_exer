@@ -3,64 +3,65 @@
 #include <math.h>
 #include <iostream>
 #include <assert.h>
-/** Compile with one of three options for matrix multiplication:
-  * NAIVE, CONSTMEM, TILED_CONSTMEM_TYPE_1, TILED_CONSTMEM_TYPE_2, TILED_CONSTMEM_CACHEHALO
-  * For Printing use flag: PRINT
-  **/
+/* Compile with one of the following options for histogram:
+ * NAIVE
+ * PRIVATIZATION
+ * THREADCOARSENING_CONTIGUOUS
+ * THREADCOARSENING_INTERLEAVED
+ * AGGREGATION
+ *
+ * Use PRINT_DATA for printing data 
+ * Use PRINT_HIST for printing histogram.
+ * Use BIASED_DATA for initializing non-uniform probability distribution for the data.
+ **/
 
-#define NUM_BINS 7
+const int BIN_SIZE = 4;
 
-#ifdef NAIVE
-const int NUM_BINSE = 32;
-#elif REGISTERTILING_THREADCOARSENING
-const int IN_TILE_SIZE = 32;
-const int OUT_TILE_SIZE = IN_TILE_SIZE - 2*STENCIL_RADIUS;
+#if defined(THREADCOARSENING_CONTIGUOUS) || defined(THREADCOARSENING_INTERLEAVED) || defined(AGGREGATION)
+const int COARSE_FACTOR = 8;
 #endif
 
+
 #ifdef NAIVE
-__global__ void hist_naive(float *hist, const float *data, unsigned int length) 
+__global__ void hist_naive(unsigned int *hist, const char *data, const int dataLength) 
 {
     unsigned int i = blockDim.x*blockIdx.x + threadIdx.x;
  
-    if(i < length) 
+    if(i < dataLength) 
     {
-        int value = data[i] - 'a';
+        int value = data[i] - 'a'; //type promotion to int when two chars are subtracted.
 
         if(value >=0 && value < 26) 
         {
-            atomic(&hist[value/BIN_SIZE],1);
+            atomicAdd(&(hist[value/BIN_SIZE]),1);
         }
     }
 }
 #endif
+
 
 #ifdef PRIVATIZATION
-
-#endif
-
-#ifdef PRIVATIZATION_SHAREDMEM
-__global__ void hist_privatization(float *hist, const float *data, unsigned int length) 
+__global__ void hist_privatization(unsigned int *hist, const char *data, 
+                                   const int dataLength, const int histLength) 
 {
-    /*assume that the kernal is launched with 
-      dim3 blockDim(block_size, 1, 1);
-      dim3 gridDim(ceil(length/block_size),1,1);
-      */
-
-    __shared__ unsigned int hist_s[NUM_BINS];
-
-    /*initialize shared memory*/
-    for (unsigned int bin=threadIdx.x; bin < NUM_BINS; bin+= blockDim.x) 
-    {
-        hist_s[bin] = 0u;    
+    extern __shared__ unsigned int sharedmem[];
+    unsigned int* hist_s =  sharedmem;
+    
+    /* Initialize shared memory to zero.
+     * Account for the possibility that the number of bins can be greater than 
+     * the number of threads in a block.
+     */
+    for(int bin=threadIdx.x; bin < histLength; bin += blockDim.x) {
+        hist_s[bin] = 0u;
     }
-
     __syncthreads();
 
-    /*map to shared memory histogram*/
+    /* Map to shared memory histogram */
     unsigned int i = blockDim.x*blockIdx.x + threadIdx.x;
-    if(i < length) 
+
+    if(i < dataLength) 
     {
-        int value = data[i] - 'a';
+        int value = data[i] - 'a'; //type promotion to int when two chars are subtracted.
 
         if(value >=0 && value < 26) 
         {
@@ -70,43 +71,36 @@ __global__ void hist_privatization(float *hist, const float *data, unsigned int 
 
     __syncthreads();
 
-
-    /*commit to global memory (all blocks commit to global memory)*/
-    /*Each thread is assigned to a bin. 
-      Number of bins can be greater than the number of threads in a block*/
-    for(int bin=threadIdx.x; bin < NUM_BINS; bin+= blockDim.x ) 
+    /* Commit to from shared to global memory. */
+    for(int bin=threadIdx.x; bin < histLength; bin += blockDim.x) 
     {
-        int binValue = hist_s[bin];
-        if(binValue > 0) 
-        {
+        unsigned int binValue = hist_s[bin];
+        if(binValue > 0) {
             atomicAdd(&(hist[bin]), binValue);
         }
     }
 }
 #endif
 
-#ifdef PRIVATIZATION_SHAREDMEM_THREADCOARSENING_CONTIGUOUS
-__global__ void hist_privatization(float *hist, const float *data, unsigned int length) 
+
+#ifdef THREADCOARSENING_CONTIGUOUS
+__global__ void hist_threadcoarsening_contiguous(unsigned int *hist, const char *data, 
+                                   const int dataLength, const int histLength) 
 {
-    /*assume that the kernal is launched with 
-      dim3 blockDim(block_size, 1, 1);
-      dim3 gridDim(ceil(length/(block_size*COARSEN_FACTOR)),1,1);
-      */
+    extern __shared__ unsigned int sharedmem[];
+    unsigned int* hist_s =  sharedmem;
 
-    __shared__ unsigned int hist_s[NUM_BINS];
-
-    /*initialize shared memory*/
-    for (unsigned int bin=threadIdx.x; bin < NUM_BINS; bin+= blockDim.x) 
+    /* Initialize hist_s */
+    for (unsigned int bin=threadIdx.x; bin < histLength; bin+= blockDim.x) 
     {
         hist_s[bin] = 0u;    
     }
 
     __syncthreads();
 
-    /*map to shared memory histogram*/
-    /*Note forloop*/
+    /* Map data to hist_s. Note for loop. */
     unsigned int tid = blockDim.x*blockIdx.x + threadIdx.x;
-    for(int i=tid*COARSE_FACTOR; i< min((tid+1)*COARSEN_FACTOR,length); ++i) 
+    for(int i=tid*COARSE_FACTOR; i< min((tid+1)*COARSE_FACTOR,dataLength); ++i) 
     {
         int value = data[i] - 'a';
         if(value >=0 && value < 26) 
@@ -116,10 +110,10 @@ __global__ void hist_privatization(float *hist, const float *data, unsigned int 
     }
     __syncthreads();
 
-    /*commit to global memory (all blocks commit to global memory)*/
-    for(int bin=threadIdx.x; bin < NUM_BINS; bin+= blockDim.x ) 
+    /* Commit to from shared to global memory. */
+    for(int bin=threadIdx.x; bin < histLength; bin+= blockDim.x ) 
     {
-        int binValue = hist_s[bin];
+        unsigned int binValue = hist_s[bin];
         if(binValue > 0) 
         {
             atomicAdd(&(hist[bin]), binValue);
@@ -128,29 +122,31 @@ __global__ void hist_privatization(float *hist, const float *data, unsigned int 
 }
 #endif
 
-#ifdef PRIVATIZATION_SHAREDMEM_THREADCOARSENING_INTERLEAVED
-__global__ void hist_privatization(float *hist, const float *data, unsigned int length) 
+
+#ifdef THREADCOARSENING_INTERLEAVED
+__global__ void hist_threadcoarsening_interleaved(unsigned int *hist, const char *data, 
+                                   const int dataLength, const int histLength) 
 {
-    /*assume that the kernal is launched with 
-      dim3 blockDim(block_size, 1, 1);
-      dim3 gridDim(ceil(length/(block_size*COARSEN_FACTOR)),1,1);
-      */
+    extern __shared__ unsigned int sharedmem[];
+    unsigned int* hist_s =  sharedmem;
 
-    __shared__ unsigned int hist_s[NUM_BINS];
-
-    /*initialize shared memory*/
-    for (unsigned int bin=threadIdx.x; bin < NUM_BINS; bin+= blockDim.x) 
+    /* Initialize hist_s */
+    for (unsigned int bin=threadIdx.x; bin < histLength; bin+= blockDim.x) 
     {
         hist_s[bin] = 0u;    
     }
 
     __syncthreads();
 
-    /*map to shared memory histogram*/
+    /* Map data to hist_s. Note for loop. */
     unsigned int tid = blockDim.x*blockIdx.x + threadIdx.x;
 
-    /*Note forloop bound and increment*/
-    for(int i=tid; i<length; i+= gridDim.x*blockDim.x) 
+    /* Note forloop bound and increment. 
+       gridDim.x*blockDim.x < dataLength, because we launched fewer threads per block.
+       i.e., blockDim.x < dataLength/gridDim.x, as
+       blockDim.x / (dataLength/gridDim.x) = COARSE_FACTOR  */
+
+    for(int i=tid; i< dataLength; i+= gridDim.x*blockDim.x) 
     {
         int value = data[i] - 'a';
         if(value >=0 && value < 26) 
@@ -160,10 +156,10 @@ __global__ void hist_privatization(float *hist, const float *data, unsigned int 
     }
     __syncthreads();
 
-    /*commit to global memory (all blocks commit to global memory)*/
-    for(int bin=threadIdx.x; bin < NUM_BINS; bin+= blockDim.x ) 
+    /* Commit to from shared to global memory. */
+    for(int bin=threadIdx.x; bin < histLength; bin+= blockDim.x ) 
     {
-        int binValue = hist_s[bin];
+        unsigned int binValue = hist_s[bin];
         if(binValue > 0) 
         {
             atomicAdd(&(hist[bin]), binValue);
@@ -172,51 +168,47 @@ __global__ void hist_privatization(float *hist, const float *data, unsigned int 
 }
 #endif
 
-#ifdef PRIVATIZATION_SHAREDMEM_THREADCOARSENING_INTERLEAVED_AGGREGATION
-__global__ void hist_privatization(float *hist, const float *data, unsigned int length) 
+
+#ifdef AGGREGATION
+__global__ void hist_aggregation(unsigned int *hist, const char *data, 
+                                 const int dataLength, const int histLength) 
 {
-    /*assume that the kernal is launched with 
-      dim3 blockDim(block_size, 1, 1);
-      dim3 gridDim(ceil(length/(block_size*COARSEN_FACTOR)),1,1);
-      */
+    extern __shared__ unsigned int sharedmem[];
+    unsigned int* hist_s =  sharedmem;
 
-    __shared__ unsigned int hist_s[NUM_BINS];
-
-    /*initialize shared memory*/
-    for (unsigned int bin=threadIdx.x; bin < NUM_BINS; bin+= blockDim.x) 
+    /* Initialize hist_s */
+    for (unsigned int bin=threadIdx.x; bin < histLength; bin+= blockDim.x) 
     {
         hist_s[bin] = 0u;    
     }
-
     __syncthreads();
-   
+
+    /* Map data to shared memory. 
+     * For loop is the same as threadcoarsening with interleaved partitioning.
+     * This routine may do well for biased data.
+     */
     unsigned int accumulator = 0;
     int prevBinIdx = -1; 
 
-    /*map to shared memory histogram*/
     unsigned int tid = blockDim.x*blockIdx.x + threadIdx.x;
 
-    /*Note forloop bound and increment*/
-    for(int i=tid; i<length; i+= gridDim.x*blockDim.x) 
+    for(int i=tid; i < dataLength; i+= gridDim.x*blockDim.x) 
     {
-	    
         int value = data[i] - 'a';
         if(value >=0 && value < 26) 
         {
             int bin = value/BIN_SIZE;		
-	    if(bin == prevBinIdx) 
-	    {
-		++accumulator;
-	    }
-	    else 
-	    {
-		if(accumulator > 0) 
-		{    
-                   atomicAdd(&(hist_s[prevBinIdx]),accumulator);
-		}
-		accumulator = 1;
-		prevBinIdx = bin;
-	    }
+	        if(bin == prevBinIdx) 
+	        {
+        		++accumulator;
+	        } else {
+                /* first commit existing accumulator */
+		        if(accumulator > 0) {    
+                    atomicAdd(&(hist_s[prevBinIdx]), accumulator);
+		        }
+		        accumulator = 1;
+		        prevBinIdx = bin;
+	        }
         }
     }
     if(accumulator > 0) 
@@ -225,10 +217,10 @@ __global__ void hist_privatization(float *hist, const float *data, unsigned int 
     }
     __syncthreads();
 
-    /*commit to global memory (all blocks commit to global memory)*/
-    for(int bin=threadIdx.x; bin < NUM_BINS; bin+= blockDim.x ) 
+    /* Commit from shared to global memory. */
+    for(int bin=threadIdx.x; bin < histLength; bin+= blockDim.x ) 
     {
-        int binValue = hist_s[bin];
+        unsigned int binValue = hist_s[bin];
         if(binValue > 0) 
         {
             atomicAdd(&(hist[bin]), binValue);
@@ -238,165 +230,141 @@ __global__ void hist_privatization(float *hist, const float *data, unsigned int 
 #endif
 
 
-void set_zero(float *M) 
-{
-    if(M != NULL) 
-    {	
-        int size = sizeof(M)/sizeof(M[0]);
-
-	std::cout << "setting array of size: " << size << " to zero\n";
-        for (int i = 0; i < size; ++i) 
-        {
-            M[i] = 0;    
-        }
+void set_zero(unsigned int* array, int length) {
+    for (int i = 0; i < length; ++i) {
+        array[i] = 0;
     }
 }
 
 
-void print_matrix(const float *M, int COL, int ROW) 
-{
-    for (int row = 0; row < ROW; ++row) 
-    {
-        for (int col = 0; col < COL; ++col) 
-	{
-            std::cout << std::setw(5) << M[row*COL + col];
-	}
-        std::cout << "\n";
+void printHistogram(const unsigned int* hist, int numBins) {
+    std::cout << "Histogram:\n";
+    for (int i = 0; i < numBins; ++i) {
+        std::cout << "Bin " << i << ": " << hist[i] << "\n";
+    }
+}
+
+
+void printData(const char* data, int length) {
+    std::cout << "Data array: \n";
+    for (int i = 0; i < length; ++i) {
+        std::cout << data[i]; 
+        if ((i + 1) % 50 == 0)
+            std::cout << "\n";
+        else if (i + 1 != length)
+            std::cout << ", ";
     }
     std::cout << "\n";
 }
 
-
-void check_error(const float* h_output, const float* answer_check, const int size) {
-
-    bool test_passed = true;
-    for(int n=0; n<size; ++n) {	
-        if(h_output[n] != answer_check[n]) {
-           std::cout << "error: n, output, correct_ans:" << std::setw(10) << n << std::setw(10) << h_output[n] << std::setw(10) << answer_check[n] << "\n";
-	   test_passed = false;
-           break; 	    
+void check_error(const unsigned int* h_hist, const unsigned int* hist_check, const int histLength)
+{
+    bool errorFound = false;
+    for (int i = 0; i < histLength; ++i) {
+        if (h_hist[i] != hist_check[i]) {
+            std::cout << "Mismatch found at bin " << i
+                      << ": GPU value = " << h_hist[i]
+                      << ", CPU value = " << hist_check[i] << std::endl;
+            errorFound = true;
         }
     }
-    if(test_passed) std::cout << "Matrix Convolution Test Passed! \n";
+    if (!errorFound) {
+        std::cout << "Histogram Test Passed!\n";
+    }
 }
+
+void initializeDataAndCreateHistogram(char* data, int dataLength, 
+                                      unsigned int* hist, int histLength) 
+{
+    /* initializing input array */
+#ifdef BIASED_DATA
+     /* create biased data such that 'a' and 'o' appear more frequently */
+     char biasedChars[] = {
+        'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a',  // 'a' appears more frequently
+        'o', 'o', 'o', 'o', 'o',  // 'o' appears more frequently
+        'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm',
+        'n', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z'
+    };
+    int numBiasedChars = sizeof(biasedChars) / sizeof(biasedChars[0]);
+    for (int i = 0; i < dataLength; ++i) {
+        data[i] = biasedChars[rand() % numBiasedChars];
+    }
+#else
+    for (int i = 0; i < dataLength; ++i) {
+        data[i] = static_cast<char>('a' + (rand() % 26));
+    }
+#endif
+
+    /* correct histogram for error checking */
+    set_zero(hist, histLength);    
+
+    for (int i = 0; i < dataLength; ++i) {
+        int value = data[i] - 'a'; //type promotion to int when two chars are subtracted.
+        if (value >= 0 && value < 26) {
+            hist[value / BIN_SIZE]++;
+        }
+    }
+}
+
 
 int main (int argc, char* argv[])
 { 
-    /*define dimensions*/ 
-    /*A (Height x InnerSize)  x B (InnerSize x Width)  = M (Height x Width) **/
-    const int N = 512;
-    const int FilterSize = 2*FILTER_RADIUS+1;
+    const int dataLength = 1024*1024*1024;
+    const int histLength = ceil(26.0/BIN_SIZE);
 
-    const int matA_memsize = Height*Width*sizeof(float);
-    const int matM_memsize = Height*Width*sizeof(float);
-    const int matF_memsize = FilterSize*FilterSize*sizeof(float);
+    int hist_memsize = sizeof(unsigned int)*histLength;
+    int data_memsize = sizeof(char)*dataLength;
 
-#ifdef NAIVE 
-    dim3 dimGrid(ceil(N/static_cast<float>(BLOCK_SIZE)), 
-		 ceil(N/static_cast<float>(BLOCK_SIZE), 
-		 ceil(N/static_cast<float>(BLOCK_SIZE)));
+    std::cout << "dataLength: "   << dataLength << "\n";
+    std::cout << "data size in (GB): " << data_memsize / std::pow(1024,3) << "\n";
+    std::cout << "histLength: "   << histLength << "\n";
+    std::cout << "BIN_SIZE: "     << BIN_SIZE << "\n";
 
-    dim3 dimBlock(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE);
-    std::cout << "cubic BLOCK_SIZE: " << std::setw(10) << BLOCK_SIZE  << "\n";
-
-#elif REGISTERTILING_THREADCOARSENING
-    dim3 dimGrid(ceil(N/static_cast<float>(OUT_TILE_SIZE)), 
-	         ceil(N/static_cast<float>(OUT_TILE_SIZE)), 
-		 ceil(N/static_cast<float>(OUT_TILE_SIZE));
-
-    dim3 dimBlock(IN_TILE_SIZE, IN_TILE_SIZE, IN_TILE_SIZE);
-    std::cout << "IN_TILE_SIZE, OUT_TILE_SIZE (square): " << std::setw(10) << IN_TILE_SIZE  << std::setw(10) << OUT_TILE_SIZE << "\n";
+    int blockSize = 4096;
+    int threadsPerBlock = blockSize;
+#if defined(THREADCOARSENING_CONTIGUOUS) || defined(THREADCOARSENING_INTERLEAVED) || defined(AGGREGATION)
+    threadsPerBlock /= COARSE_FACTOR;
+    std::cout << "COARSE_FACTOR: " << COARSE_FACTOR << "\n";
 #endif
+    int blocksPerGrid = (dataLength - 1)/blockSize + 1;
+
+    std::cout << "\nblocks per grid: "   << blocksPerGrid << "\n";
+    std::cout << "threads per block: " << threadsPerBlock << "\n";
 
     int devID=0;
     if(argc > 1) devID = atoi(argv[1]);
 
-    /*print cuda device properties*/
-    cudaDeviceProp prop;
-    cudaGetDeviceProperties(&prop, devID);
-    std::cout << "\nDevice: " << prop.name << "\n";
-    std::cout << "Matrix sizes (height, width, filter size): "    << std::setw(10) << Height << std::setw(10) << Width << std::setw(10) << FilterSize << "\n";
-    std::cout << "dimGrid (x,y,z):  "<< std::setw(10) << dimGrid.x  << std::setw(10) << dimGrid.y << std::setw(10) << dimGrid.z << "\n";
-    std::cout << "dimBlock (x,y,z): "<< std::setw(10) << dimBlock.x << std::setw(10) << dimBlock.y << std::setw(10) << dimBlock.z << "\n";
-
-    std::cout << "\nconstant memory (KB): " << prop.totalConstMem/1024 << "\n";
-    std::cout << "total global memory (GB): " << prop.totalGlobalMem/(pow(1024,3)) << "\n";
-    std::cout << "shared memory per block (KB): " << prop.sharedMemPerBlock/1024 << "\n";
-    std::cout << "shared memory per multiprocessor (KB): " << prop.sharedMemPerMultiprocessor/1024 << "\n";
-    std::cout << "register per block: " << prop.regsPerBlock << "\n";
-    std::cout << "register per multiprocessor: " << prop.regsPerMultiprocessor << "\n";
-    std::cout << "multiProcessorCount: " << prop.multiProcessorCount << "\n";
-    std::cout << "warpSize: " << prop.warpSize<< "\n";
-    /*cudaSetDevice(devID)*/
+    cudaError_t err = cudaSetDevice(devID);
+    if (err != cudaSuccess) {
+        std::cerr << "Failed to set device: " << cudaGetErrorString(err) << "\n";
+        return -1;
+    } 
 
     /*define arrays on host and device*/
-    /*A*B = M*/
-    float* h_A = (float *) malloc(matA_memsize);
-    float* h_F = (float *) malloc(matF_memsize);
-    float* h_M = (float *) malloc(matM_memsize);
+    char* h_data = (char*) malloc(data_memsize);
+    unsigned int* h_hist = (unsigned int*) malloc(hist_memsize);
+    unsigned int* hist_check = (unsigned int*) malloc(hist_memsize);
 
-    float* M_check = (float *) malloc(matM_memsize);
+    char* d_data = NULL;
+    cudaMalloc(&d_data, data_memsize);
 
-    float* d_A = NULL;
-    cudaMalloc(&d_A, matA_memsize);
-    float* d_F = NULL;
-    cudaMalloc(&d_F, matF_memsize);
-    float* d_M = NULL;
-    cudaMalloc(&d_M, matM_memsize);
+    unsigned int* d_hist = NULL;
+    cudaMalloc(&d_hist, hist_memsize);
 
-    /*initializing input array*/
-    for (int j=0; j < Height; ++j) {
-	for (int i=0; i < Width; ++i) {
-	    h_A [j*Width + i] = static_cast<float>(j);
-	}
-    }
-    for (int j=0; j < FilterSize; ++j) {
-	for (int i=0; i < FilterSize; ++i) {
-	    h_F [j*FilterSize + i] = static_cast<float>((j));
-	}
-    }
-    /*correct answer for error checking*/
-    for (int row=0; row < Height; ++row) 
-    {
-	for (int col=0; col < Width; ++col) 
-	{
-	    float sum = 0.f;
-            for(int j =  0; j < FilterSize; ++j) 
-	    {
-                for(int i = 0; i < FilterSize; ++i) 
-	        {
-	            int inCol = col + i - FILTER_RADIUS; 		    
-	            int inRow = row + j - FILTER_RADIUS;
-	            if(inRow >= 0 && inRow < Height && inCol >=0 && inCol < Width) 
-	            {
-                        sum += h_A[inRow*Width + inCol] * h_F[j*FilterSize + i];     
-	            }
-	        }
-	    }
-	    M_check [row*Width + col] = sum;
-	}
-    }
+    initializeDataAndCreateHistogram(h_data, dataLength, hist_check, histLength);
 
-#ifdef PRINT
-    std::cout << "\nWriting A matrix:\n";
-    print_matrix(h_A, Width, Height);
-
-    std::cout << "Writing Filter F:\n";
-    print_matrix(h_F, FilterSize, FilterSize);
-
-    std::cout << "Writing correct answer for M matrix:\n";
-    print_matrix(M_check, Width, Height);
+#ifdef PRINT_DATA
+    printData(h_data, dataLength);
 #endif
 
-    cudaMemcpy(d_A, h_A, matA_memsize, cudaMemcpyHostToDevice);
-
-#ifdef NAIVE
-    cudaMemcpy(d_F, h_F, matF_memsize, cudaMemcpyHostToDevice);
-#else  //use constant memory
-    cudaMemcpyToSymbol(F, h_F, matF_memsize);
+#ifdef PRINT_HIST
+    std::cout << "Correct answer for ";
+    printHistogram(hist_check, histLength);
 #endif
 
-    cudaMemset(d_M, 0, matM_memsize);
+    cudaMemcpy(d_data, h_data, data_memsize, cudaMemcpyHostToDevice);
+    cudaMemset(d_hist, 0, hist_memsize);
+
     cudaEvent_t startEvent, stopEvent;
     cudaEventCreate(&startEvent);
     cudaEventCreate(&stopEvent);
@@ -404,9 +372,19 @@ int main (int argc, char* argv[])
     cudaEventRecord(startEvent, 0);
 
 #ifdef NAIVE
-    stencil_naive<<<dimGrid, dimBlock>>>(d_out, d_in, N);
-#elif REGISTERTILING_THREADCOARSENING
-    stencil_registertiling_threadcoarsening<<<dimGrid, dimBlock>>>(d_out, d_in, N);
+    hist_naive<<<blocksPerGrid, threadsPerBlock>>>(d_hist, d_data, dataLength);
+#elif PRIVATIZATION
+    hist_privatization<<<blocksPerGrid, threadsPerBlock, histLength>>>
+                      (d_hist, d_data, dataLength, histLength);
+#elif THREADCOARSENING_CONTIGUOUS
+    hist_threadcoarsening_contiguous<<<blocksPerGrid, threadsPerBlock, histLength>>>
+                                    (d_hist, d_data, dataLength, histLength);
+#elif THREADCOARSENING_INTERLEAVED
+    hist_threadcoarsening_interleaved<<<blocksPerGrid, threadsPerBlock, histLength>>>
+                                     (d_hist, d_data, dataLength, histLength);
+#elif AGGREGATION
+    hist_aggregation<<<blocksPerGrid, threadsPerBlock, histLength>>>
+                       (d_hist, d_data, dataLength, histLength);
 #endif
 
     cudaEventRecord(stopEvent, 0);
@@ -414,30 +392,33 @@ int main (int argc, char* argv[])
     cudaEventElapsedTime(&ms, startEvent, stopEvent);
     std::cout << "\nElapsed time to run kernel (ms): " << ms << "\n";
 
-    cudaMemcpy(h_M, d_M, matM_memsize, cudaMemcpyDeviceToHost); 
+    //no need for device synchronize here since event synchronize is used before.
+    err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        std::cerr << "Kernel execution failed: " << cudaGetErrorString(err) << std::endl;
+        return -1;
+    }
+
+    cudaMemcpy(h_hist, d_hist, hist_memsize, cudaMemcpyDeviceToHost); 
   
-#ifdef PRINT
-    std::cout << "Writing M matrix:\n";
-    print_matrix(h_M, Width, Height);
+#ifdef PRINT_HIST
+    std::cout << "\nGPU computed ";
+    printHistogram(h_hist, histLength);
 #endif
 
-   check_error(h_M, M_check, Width*Height);
+    check_error(h_hist, hist_check, histLength);
 
-//error_exit:
     /*free memory*/
     cudaEventDestroy(startEvent);
     cudaEventDestroy(stopEvent);
 
-    free(h_A);
-    free(h_F);
-    free(h_M);
-    free(M_check);
+    free(h_data); h_data = NULL;
+    free(h_hist); h_hist = NULL;
+    free(hist_check); hist_check = NULL;
 
-    cudaFree(d_A);
-    cudaFree(d_F);
-    cudaFree(d_M);
+    cudaFree(d_data); d_data = NULL;
+    cudaFree(d_hist); d_hist = NULL;
 
     cudaDeviceReset();
     return 0;
 }
-
