@@ -5,4 +5,4 @@ Practice codes for GPU optimization.
 - For each code, there are multiple kernels with different optimizations enabled based on preprocessor directives. 
   Check them at the beginning of the code before compiling.
 - e.g.: nvcc -arch=sm_70 -DTILED -o solver.x matmul.cu 
-- These codes need cleaning: merge, prefix_sum, histogram, atomic. I will do it soon.
+- These codes need cleaning: merge, prefix_sum, atomic. I will do it soon.
