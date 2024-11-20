@@ -99,7 +99,32 @@ __global__ void convolution_constmem(float *M, const float *A, const int Height,
 
 __global__ void convolution_tiled_constmem_type1(float *M, const float *A, const int Height, const int Width) 
 {
-	
+    /* Tile size equal to input tile.
+     *
+     * Overview:
+     * - Define inRow and inCol corresponding to input tile.
+     *
+     * - Define a tile of size IN_TILE_SIZE * IN_TILE_SIZE
+     *
+     * - Load tile
+     *   - Use inRow and inCol that are within domain bounds
+     *     otherwise set tile values to zero
+     * - Synchronize
+     *
+     * - Compute convolution (this is tricky because we have to switch off some threads)
+     *
+     *   - Use inRow and inCol that are within domain bounds
+     *
+     *     - Switch off threads that are outside of output tile size
+     *       (e.g. threadIdx.y - FilterRadius >=0 && < OUT_TILE_SIZE)
+     *
+     *       - Compute convolution where tile[threadIdx.y-FilterRadius+i][...]
+     *         where i and j are from 0 to FilterSize
+     *     
+     *       - store sum in M[inRow*Width+inCol]
+     */
+       
+
     int FilterSize = 2*FILTER_RADIUS + 1;
 
     int inCol = blockIdx.x*OUT_TILE_SIZE - FILTER_RADIUS + threadIdx.x;
@@ -142,6 +167,34 @@ __global__ void convolution_tiled_constmem_type1(float *M, const float *A, const
 
 __global__ void convolution_tiled_constmem_type2(float *M, const float *A, const int Height, const int Width) 
 {
+    /* Tile size equal to output tile.
+     *
+     * Overview:
+     * - Define outRow and outCol corresponding to output tile.
+     *
+     * - Define a tile of size IN_TILE_SIZE x IN_TILE_SIZE
+     *
+     * - Load tile (this is tricky, each thread may load more than 1 elements)
+     *   - for loop over j and i, (e.g. j=threadIdx.y; j<IN_TILE_SIZE; j+=OUT_TILE_SIZE)
+     * 
+     *     - compute inRow, inCol (e.g. inRow = blockIdx.y*OUT_TILE_SIZE - FilterRadius + j)
+     *     
+     *     - load: tile[j][i] = A[inRow*Width+inCol]
+     *
+     *     - Make sure inRow and inCol within bounds otherwise set to zero
+     *
+     * - Synchronize
+     *
+     * - Compute convolution
+     *
+     *   - Use outRow and outCol that are within domain bounds
+     *
+     *     - Compute convolution by looping over i,j from 0 to FilterSize
+     *       - sum += tile[tile_row][...] *F[j][i];
+     *         where tile_row = threadIdx.y + j  //Note this
+     *     
+     *     - store sum in M[inRow*Width+inCol]
+     */
 	
     int FilterSize = 2*FILTER_RADIUS + 1;
     int outRow = blockIdx.y*OUT_TILE_SIZE + threadIdx.y;
@@ -150,17 +203,13 @@ __global__ void convolution_tiled_constmem_type2(float *M, const float *A, const
     __shared__ float tile_A[IN_TILE_SIZE][IN_TILE_SIZE];
 
     /*load tile*/
-    /*Note here that i and j start as threadIdx.x and threadIdx.y, respectively*/
-    /*Each thread at least loads 1 element, while other threads load extra element depending on the difference between IN and OUT tile sizes*/
     for(int j=threadIdx.y; j < IN_TILE_SIZE; j += OUT_TILE_SIZE) 
     {
         for(int i=threadIdx.x; i < IN_TILE_SIZE; i += OUT_TILE_SIZE)	
         {
-            /*global Ids of input tile, check the offset in the bracket*/		
             int inRow = j + (blockIdx.y*OUT_TILE_SIZE - FILTER_RADIUS);
             int inCol = i + (blockIdx.x*OUT_TILE_SIZE - FILTER_RADIUS);
            
-	    /*now we need to make sure whether inRow and inCol is within bounds*/
             if(inRow >=0 && inRow < Height && inCol >=0 && inCol < Width) 
             {  
                 tile_A[j][i] = A[inRow*Width + inCol];
@@ -176,8 +225,6 @@ __global__ void convolution_tiled_constmem_type2(float *M, const float *A, const
 
     if(outRow < Height && outCol < Width) 
     {
-	    /* Note that for thread associated with M[outRow][outCol], tile_A[threadIdx.y][threadIdx.x] would refer to 
-	       the beginning of the element with which we would have to multiply the filter */
         float sum = 0.f;	    
         for(int j=0; j<FilterSize; ++j) 
         {
@@ -198,6 +245,32 @@ __global__ void convolution_tiled_constmem_type2(float *M, const float *A, const
 #ifdef TILED_CONSTMEM_CACHEHALO
 __global__ void convolution_tiled_constmem_cachehalo(float *M, const float *A, const int Height, const int Width) 
 {
+    /* Tile size equal to output tile. We load elements in the halo from memory, 
+     * expecting them to be located most likely in the L2 cache.
+     *
+     * Overview:
+     * - Define outRow and outCol corresponding to output tile.
+     *
+     * - Define a tile of size OUT_TILE_SIZE x OUT_TILE_SIZE
+     *
+     * - Load tile, if outside domain bounds then set value to zero.
+     *
+     * - Synchronize
+     *
+     * - Compute convolution
+     *
+     *   - Make sure outRow and outCol are within the domain bounds
+     *
+     *     - Loop over i,j from 0 to FilterSize
+     *       - Compute local_rowID and local_colID=threadIdx.x - FilterRadius + i
+     *         - if these are within 0 to OUT_TILE_SIZE
+     *           - then load elements from tile for convolution
+     *         - else 
+     *           - compute the global_rowID and global_colID=col-FilterRadius+i
+     *           - if these are within the domain bounds
+     *             - then load elements from memory for convolution
+     *     - store sum in M[inRow*Width+inCol]
+     */
 	
     int FilterSize = 2*FILTER_RADIUS + 1;
 
@@ -224,7 +297,6 @@ __global__ void convolution_tiled_constmem_cachehalo(float *M, const float *A, c
 	            int local_A_rowId = threadIdx.y + j - FILTER_RADIUS;
 	         	int local_A_colId = threadIdx.x + i - FILTER_RADIUS;
 
-		        /*if thread is within the local tile*/
 		        if(local_A_colId >=0 && local_A_colId < TILE_SIZE && 
 		           local_A_rowId >=0 && local_A_rowId < TILE_SIZE)     
 		        {
@@ -235,7 +307,6 @@ __global__ void convolution_tiled_constmem_cachehalo(float *M, const float *A, c
                     int global_A_rowId = row + j - FILTER_RADIUS;
                     int global_A_colId = col + i - FILTER_RADIUS;
         
-                    /*if global ids for accessing A are within the global boundaries*/
                     if (global_A_colId >= 0 && global_A_colId < Width &&   
                         global_A_rowId >= 0 && global_A_rowId < Height)  
                     {
