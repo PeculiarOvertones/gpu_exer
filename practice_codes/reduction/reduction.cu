@@ -24,7 +24,17 @@ __global__ void reduce_sum_naive(float *output, float *in)
      * - Assume kernel is launched with:
      *   threadsPerBlock = dataLength/2
      *   gridDim.x = 1
-     */
+     *
+     *   visualization
+         | represents blockDim.x
+         * represent active threads
+         0 1 2 3 4 5 6 7
+         *   *   *   *  (stride 1)
+         0   2   4   6
+         *       *      (stride 2)
+         0       4
+         *              (stride 4)
+    */
 
     unsigned int i = 2*threadIdx.x;
 
@@ -50,7 +60,17 @@ __global__ void reduce_sum_convergent(float *output, float *in)
      * - Assume kernel is launched with:
      *   threadsPerBlock = dataLength/2
      *   gridDim.x = 1
-     **/
+     *
+     *   visualization
+         | represents blockDim.x
+         * represent active threads
+         0 1 2 3 | 4 5 6 7
+         * * * *          (stride 4)
+         0 1 2 3          
+         * *              (stride 2)
+         0 1
+         *                (stride 1)
+    */
 
     unsigned int i = threadIdx.x;
 
@@ -107,7 +127,22 @@ __global__ void reduce_sum_hierarchical(float *output, const float *in)
      * - preserves input array.
      * - Assume kernel is launched with:
      *   gridDim.x = dataLength/(2*threadsPerBlock));
-     **/
+     *
+     *   fix threadsPerBlock, e.g. 64
+     *   then block_size = 2*threadsPerBlock
+     *   blocksPerGrid = (dataLength-1)/block_size + 1; 
+     *   dim3 dimGrid(blocksPerGrid,1,1);
+     *   dim3 dimBlock(threadsPerBlock,1,1);
+     *
+     *   e.g. dataLength = 256
+     *   threadPerBlock=64 (blockDim.x)
+     *   block_size = 128 
+     *   blocksPerGrid = 2 (gridDim.x)
+     *   sharedmem size = threadsPerBlock
+     *   dataLength_local = 2*blockDim.x
+     *   segment = dataLength_local*blockIdx.x;
+     *   i = segment + threadIdx.x;
+     */    
 
     extern __shared__ float sharedmem[];
     float* in_s = sharedmem;
@@ -142,6 +177,21 @@ __global__ void reduce_sum_threadcoarsening(float *output, const float *in)
      * - preserves input array.
      * - Assume kernel is launched with:
      *   gridDim.x = dataLength/(2*COARSE_FACTOR*threadsPerBlock));
+     *
+     *   fix threadsPerBlock, e.g. 64
+     *   then block_size = 2*threadsPerBlock*COARSE_FACTOR
+     *   blocksPerGrid = (dataLength-1)/block_size + 1; 
+     *   dim3 dimGrid(blocksPerGrid,1,1);
+     *   dim3 dimBlock(threadsPerBlock,1,1);
+     *
+     *   e.g. dataLength = 512
+     *   threadPerBlock=64 (blockDim.x)
+     *   block_size = 256  (assuming COARSE_FACTOR = 2)
+     *   blocksPerGrid= 2  (gridDim.x)
+     *   sharedmem size = threadsPerBlock
+     *   dataLength_local = 2*blockDim.x*COARSE_FACTOR
+     *   segment = dataLength_local*blockIdx.x;
+     *   i = segment + threadIdx.x;
      **/
     extern __shared__ float sharedmem[];
     float* in_s = sharedmem;
