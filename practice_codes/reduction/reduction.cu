@@ -34,6 +34,13 @@ __global__ void reduce_sum_naive(float *output, float *in)
          *       *      (stride 2)
          0       4
          *              (stride 4)
+
+    * Problem with this:
+    * No memory coalescing (adjacent threads in warp accessing increasingly distant locations 
+    * in memory, causing increased control divergence and more global memory requests.
+    * Low execution resource utilization (ratio of scheduled resources 
+    * including inactive threads in a warp / resources actually used, 
+    * i.e. number of active threads doing the work)
     */
 
     unsigned int i = 2*threadIdx.x;
@@ -70,6 +77,11 @@ __global__ void reduce_sum_convergent(float *output, float *in)
          * *              (stride 2)
          0 1
          *                (stride 1)
+    *
+    * Advantages:    
+    * Memory is coalesced. Less control divergence. Fewer global memory requests. More efficient bandwidth utilization.
+    * Better execution resource utilization.
+    * 
     */
 
     unsigned int i = threadIdx.x;
@@ -97,6 +109,11 @@ __global__ void reduce_sum_sharedmem(float *output, const float *in)
      * - Assume kernel is launched with:
      *   threadsPerBlock = dataLength/2
      *   gridDim.x = 1
+     *
+     * Advantages:
+     * Fewer global memory accesses. Only N+1 (only while initially reading data into SMEM 
+     * and writing data to output.)
+     * Input array is not modified.
      **/
     extern __shared__ float sharedmem[];
     float* in_s = sharedmem;
@@ -126,22 +143,23 @@ __global__ void reduce_sum_hierarchical(float *output, const float *in)
     /* - works for large data.
      * - preserves input array.
      * - Assume kernel is launched with:
-     *   gridDim.x = dataLength/(2*threadsPerBlock));
-     *
-     *   fix threadsPerBlock, e.g. 64
-     *   then block_size = 2*threadsPerBlock
-     *   blocksPerGrid = (dataLength-1)/block_size + 1; 
+     *   gridDim.x = dataLength/block_size i.e. (dataLength-1)/block_size + 1
+     *   where block_size = 2*threadsPerBlock
+     *   fix threadsPerBlock (blockDim.x) to say 64
      *   dim3 dimGrid(blocksPerGrid,1,1);
      *   dim3 dimBlock(threadsPerBlock,1,1);
      *
      *   e.g. dataLength = 256
      *   threadPerBlock=64 (blockDim.x)
-     *   block_size = 128 
+     *   block_size=128 
      *   blocksPerGrid = 2 (gridDim.x)
      *   sharedmem size = threadsPerBlock
      *   dataLength_local = 2*blockDim.x
      *   segment = dataLength_local*blockIdx.x;
      *   i = segment + threadIdx.x;
+     *
+     * Advantages:
+     * We can launch multiple threadblocks.
      */    
 
     extern __shared__ float sharedmem[];
@@ -192,6 +210,12 @@ __global__ void reduce_sum_threadcoarsening(float *output, const float *in)
      *   dataLength_local = 2*blockDim.x*COARSE_FACTOR
      *   segment = dataLength_local*blockIdx.x;
      *   i = segment + threadIdx.x;
+     *
+     * Advantages:
+     * In processors with limited execution resources, the hardware may only have limited 
+     * resources to execute threadblocks in parallel. In this case, the hardware will serialize
+     * the surplus threadblocks, executing a new thread block whenever an old one has completed.    * In this case, we pay price to distribute the work across multiple threadblocks.
+     * Threadcoarsening serializes some of the work into fewer threads to reduce parallelization  overhead.
      **/
     extern __shared__ float sharedmem[];
     float* in_s = sharedmem;
